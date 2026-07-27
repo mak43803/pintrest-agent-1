@@ -761,16 +761,16 @@ Example: <product>COSRX Snail Mucin 96% Power Repairing Essence</product>
             match = re.search(r'<product>(.*?)</product>', response, re.DOTALL | re.IGNORECASE)
             if match:
                 res_clean = match.group(1).strip().replace('"', "")
-                if len(res_clean) >= 5 and "trending" not in res_clean.lower():
+                if len(res_clean) >= 5 and not any(w in res_clean.lower() for w in ["trending", "beauty trend", "trend product", "selected product"]):
                     return res_clean
             lines = [l.strip().replace('"', '').replace('*', '').replace('`', '') for l in response.strip().split('\n') if l.strip()]
             for l in lines:
                 l_clean = l
-                for prefix in ["Category:", "Product:", "Keyword:", "Selected product keyword:", "Recommended:", "Selected:"]:
+                for prefix in ["Category:", "Product:", "Keyword:", "Selected product keyword:", "Recommended:", "Selected:", "Selected Beauty Trend Product:"]:
                     if l_clean.lower().startswith(prefix.lower()):
                         l_clean = l_clean[len(prefix):].strip()
                 l_lower = l_clean.lower()
-                if l_clean.startswith("#") or l_clean.startswith("🌟") or "why this" in l_lower or "trending beauty" in l_lower or "recommended" in l_lower or l_lower.startswith("category"):
+                if l_clean.startswith("#") or l_clean.startswith("🌟") or "why this" in l_lower or "trending beauty" in l_lower or "beauty trend" in l_lower or "trend product" in l_lower or "recommended" in l_lower or l_lower.startswith("category"):
                     continue
                 if len(l_clean) >= 5 and len(l_clean) <= 70:
                     return l_clean

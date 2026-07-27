@@ -40,7 +40,7 @@ from typing import Any
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from browser.browser_manager import BrowserManager
-from utils.exceptions import BrowserNavigationError, ElementNotFoundError
+from utils.exceptions import BrowserNavigationError, ElementNotFoundError, FatalLoginError
 
 logger = logging.getLogger("pinterest_agent.browser.client")
 
@@ -59,6 +59,7 @@ class PinterestClient:
         self._manager = manager
         # Keep a single page instance for the client session
         self._page: Page | None = None
+        self._login_failures = 0
         
         # Self-Healing properties
         from typing import Callable, Awaitable
@@ -374,14 +375,18 @@ class PinterestClient:
                 )
 
             logger.info("Login successful.")
+            self._login_failures = 0
             
             # Save the new cookies immediately
             await self._manager._save_session()
 
         except Exception as exc:
-            if isinstance(exc, BrowserNavigationError):
-                raise
-            raise BrowserNavigationError(f"Login sequence failed: {exc}") from exc
+            self._login_failures += 1
+            logger.warning("Pinterest login attempt failed (Attempt %d/2): %s", self._login_failures, exc)
+            if self._login_failures >= 2:
+                logger.critical("🛑 PINTEREST LOGIN FAILED 2 CONSECUTIVE TIMES! Stopping agent to prevent suspicious activity locks.")
+                raise FatalLoginError("Pinterest login failed 2 consecutive times. Stopping agent for security. Run 'python login_pinterest_once.py' to authenticate manually.") from exc
+            raise
 
     async def _find_visible_locator(self, page, selectors):
         """

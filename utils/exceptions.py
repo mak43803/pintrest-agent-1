@@ -48,6 +48,11 @@ class ElementNotFoundError(PinterestAgentError):
     pass
 
 
+class FatalLoginError(PinterestAgentError):
+    """Raised when login fails 2 consecutive times to prevent account suspensions."""
+    pass
+
+
 # ── Database Errors ────────────────────────────────────────────────────
 class DatabaseConnectionError(PinterestAgentError):
     """Raised when the SQLite database cannot be opened."""

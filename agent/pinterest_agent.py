@@ -476,12 +476,12 @@ class PinterestAgent:
             raise
 
     def get_pending_linktree_product(self) -> dict | None:
-        """Query DB for the next product pending Linktree sync (status = 'Pinterest_Published')."""
+        """Query DB for the next product pending Linktree sync."""
         with self.db.connection() as conn:
             cursor = conn.execute("""
                 SELECT id, product_name, title, board_name, affiliate_link 
                 FROM products 
-                WHERE status = 'Pinterest_Published' AND affiliate_link IS NOT NULL AND affiliate_link != ''
+                WHERE status IN ('Pinterest_Published', 'Linktree_Deferred') AND affiliate_link IS NOT NULL AND affiliate_link != ''
                 ORDER BY id ASC LIMIT 1
             """)
             row = cursor.fetchone()
@@ -572,14 +572,18 @@ class PinterestAgent:
             max_retries = 5
             candidate_keyword = None
             for attempt in range(max_retries):
-                # Do NOT pass Amazon Best Sellers anymore to force Gemini to use fresh Pinterest/Google trends
-                candidate = await self.gemini.generate_product_idea(niche, past_products, live_trends, "", "")
-                candidate = self.parse_product_keyword(candidate)
+                if attempt >= 2:
+                    logger.info("Attempt %d: Gemini stuck in repeat loop. Sourcing directly from live Pinterest trends/fallbacks...", attempt + 1)
+                    candidate = self._get_unique_trend_fallback(live_trends, past_products, niche)
+                else:
+                    # Do NOT pass Amazon Best Sellers anymore to force Gemini to use fresh Pinterest/Google trends
+                    candidate = await self.gemini.generate_product_idea(niche, past_products, live_trends, "", "")
+                    candidate = self.parse_product_keyword(candidate)
                 
                 # Validate keyword contains no blocked terms and is not generic
                 candidate_lower = candidate.lower()
-                blocked_terms = ["pinterest", "google", "analysis", "trends", "passive income", "profits"]
-                is_generic = candidate_lower in ["trending beauty product", "makeup beauty find"] or len(candidate) < 4
+                blocked_terms = ["pinterest", "google", "analysis", "trends", "passive income", "profits", "selected beauty trend", "trend product", "selected product"]
+                is_generic = candidate_lower in ["trending beauty product", "makeup beauty find", "selected beauty trend product", "beauty trend product", "selected product"] or "trend product" in candidate_lower or "beauty trend" in candidate_lower or len(candidate) < 4
                 has_blocked = any(w in candidate_lower for w in blocked_terms)
                 
                 if is_generic or has_blocked:
@@ -593,10 +597,10 @@ class PinterestAgent:
                         candidate_keyword = candidate
                         break
                     else:
-                        logger.warning("Gemini generated duplicate keyword: '%s'. Retrying...", candidate)
+                        logger.warning("Generated duplicate keyword: '%s'. Retrying...", candidate)
                         past_products.append(candidate)
             else:
-                raise Exception("Failed to generate a unique beauty product keyword after multiple attempts.")
+                candidate_keyword = self._get_unique_trend_fallback(live_trends, past_products, niche)
             return candidate_keyword
 
         # AUTOMATIC UNIQUE PRODUCT RETRY LOOP (Max 5 attempts to ensure 0 duplicates)
@@ -876,7 +880,51 @@ class PinterestAgent:
             raise
         
         logger.info("🎉 SUCCESS! Pin published at: %s", pin_url)
-        return True
+    def _get_unique_trend_fallback(self, live_trends: list[str], past_products: list[str], niche: str) -> str:
+        """
+        Safely returns a fresh, non-duplicate viral beauty product keyword 
+        directly from live Pinterest Trends or curated viral beauty fallbacks.
+        """
+        import random
+        past_set = set(p.lower().strip() for p in (past_products or []))
+        
+        # 1. Try to find a live trend keyword that hasn't been posted yet
+        if live_trends:
+            available_trends = [t.strip() for t in live_trends if t.strip().lower() not in past_set and len(t.strip()) > 5]
+            if available_trends:
+                chosen = random.choice(available_trends)
+                logger.info(f"Fallback selected fresh live trend keyword: '{chosen}'")
+                return chosen
+
+        # 2. Curated viral beauty fallbacks
+        fallbacks = [
+            "Biodance Bio-Collagen Real Deep Mask",
+            "Beauty of Joseon Relief Sun SPF 50",
+            "Medicube Zero Pore Pad 2.0",
+            "e.l.f. Glow Reviver Lip Oil",
+            "ONE/SIZE Patrick Starrr Waterproof Setting Spray",
+            "Hero Cosmetics Mighty Patch Original",
+            "Sol de Janeiro Cheirosa 68 Perfume Mist",
+            "Laneige Lip Sleeping Mask Berry",
+            "Glow Recipe Watermelon Niacinamide Dew Drops",
+            "Weleda Skin Food Original Ultra-Rich Cream",
+            "First Aid Beauty Ultra Repair Cream",
+            "Anua Heartleaf 77 Soothing Toner",
+            "COSRX Advanced Snail 96 Mucin Power Essence",
+            "Cosrx Acne Pimple Master Patch",
+            "Tree Hut Shea Sugar Body Scrub Vanilla",
+            "Moroccanoil Treatment Original Hair Oil",
+            "Color Wow Dream Coat Anti-Frizz Treatment",
+            "The Ordinary Glycolic Acid 7% Toning Solution"
+        ]
+        
+        available_fallbacks = [f for f in fallbacks if f.lower().strip() not in past_set]
+        if available_fallbacks:
+            chosen = random.choice(available_fallbacks)
+            logger.info(f"Fallback selected fresh curated keyword: '{chosen}'")
+            return chosen
+
+        return random.choice(fallbacks)
 
     async def update_pin_analytics(self, scroll_count: int = 4) -> None:
         """
@@ -937,7 +985,7 @@ class PinterestAgent:
             "pinterest", "google", "analysis", "trends", "passive income", "profits", "based on", "following",
             "step 1", "step 2", "step 3", "step 4", "step 5", "step 6", "step 7", "step 8", "step 9", "step 10",
             "navigation", "workflow", "proceed", "completed", "instructions", "overview", "dashboard", "selection",
-            "research", "workflow developer", "navigation handbook"
+            "research", "workflow developer", "navigation handbook", "selected beauty trend product", "beauty trend product", "selected product", "trend product"
         ]
             
         # 1. Clean list prefixes, numbered items, and bold formatting

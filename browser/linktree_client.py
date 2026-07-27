@@ -52,6 +52,8 @@ class LinktreeClient:
                 logger.info(f"Left profile drawer is open (attempt {drawer_attempts}). Toggling profile header button (80, 118) to close...")
                 await page.mouse.click(80, 118)
                 await page.wait_for_timeout(500)
+                await page.mouse.click(700, 300)
+                await page.wait_for_timeout(500)
                 await page.keyboard.press("Escape")
                 await page.wait_for_timeout(800)
                 drawer_loc = page.locator('*:has-text("Create new Linktree"), *:has-text("Share feedback")')

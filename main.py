@@ -33,6 +33,7 @@ if hasattr(sys.stderr, "reconfigure"):
 load_dotenv()
 
 from agent.pinterest_agent import PinterestAgent
+from utils.exceptions import FatalLoginError
 
 # Setup local logger
 logging.basicConfig(level=logging.INFO, format="%(asctime)s │ %(levelname)-8s │ %(message)s")
@@ -531,6 +532,18 @@ async def main() -> None:
                 try:
                     success = await agent.run_affiliate_pipeline(niche=current_category, product_keyword=trending_product)
                     consecutive_failures = 0  # Reset on success
+                except FatalLoginError as fatal_err:
+                    logger.critical("=================================================================")
+                    logger.critical("🛑 CRITICAL SECURITY STOP: PINTEREST LOGIN FAILED 2 TIMES IN A ROW!")
+                    logger.critical("Pinterest may have served a Captcha or Suspicious Activity check.")
+                    logger.critical("")
+                    logger.critical("👉 TO FIX THIS SAFELY WITHOUT RISKING ACCOUNT LOCKS:")
+                    logger.critical("   1. Open a terminal and run:  python login_pinterest_once.py")
+                    logger.critical("   2. Log in manually in the opened Chrome window.")
+                    logger.critical("   3. Once logged in, restart the agent: python main.py")
+                    logger.critical("=================================================================")
+                    await agent.shutdown()
+                    sys.exit(1)
                 except Exception as e:
                     consecutive_failures += 1
                     error_str = str(e).lower()
