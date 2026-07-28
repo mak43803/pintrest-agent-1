@@ -512,6 +512,7 @@ class PinterestClient:
 
             # 2. Fill Title
             logger.debug("Filling title...")
+            title_input = None
             try:
                 # Auto-dismiss any leave site dialogs that block navigation
                 import asyncio
@@ -529,8 +530,38 @@ class PinterestClient:
                     'input[id="pin-draft-title"]',
                     '#pin-draft-title',
                     'div[role="textbox"][aria-label*="title" i]',
-                    '[aria-label*="title" i]'
+                    '[aria-label*="title" i]',
+                    '[data-test-id="pin-draft-title"] textarea',
+                    '[data-test-id="pin-draft-title"] input',
+                    '[data-test-id="pin-draft-title"]',
+                    '[data-test-id^="pin-draft-title"]',
                 ])
+
+                # JS fallback: find any input/textarea whose placeholder contains "title" (case-insensitive)
+                if not title_input:
+                    logger.info("Standard title selectors failed, trying JS-based placeholder search...")
+                    try:
+                        js_handle = await page.evaluate_handle("""
+                            () => {
+                                const candidates = [...document.querySelectorAll('input, textarea, [contenteditable="true"], [role="textbox"]')];
+                                return candidates.find(el => {
+                                    const ph = (el.placeholder || el.getAttribute('aria-label') || el.getAttribute('data-placeholder') || '').toLowerCase();
+                                    return ph.includes('title');
+                                }) || null;
+                            }
+                        """)
+                        el = js_handle.as_element()
+                        if el:
+                            title_input = page.locator(':root').locator('css=input, textarea, [contenteditable]').filter(has=page.locator(':scope')).first
+                            # Use direct element handle instead
+                            await js_handle.as_element().click()
+                            await page.keyboard.press("Control+A")
+                            await page.keyboard.press("Backspace")
+                            await page.keyboard.type(title[:100], delay=10)
+                            logger.info("Successfully filled Pinterest title via JS placeholder search.")
+                            title_input = None  # Mark as already handled
+                    except Exception as js_e:
+                        logger.debug(f"JS title search failed: {js_e}")
                         
                 if title_input:
                     await title_input.scroll_into_view_if_needed()
@@ -538,7 +569,7 @@ class PinterestClient:
                     await page.wait_for_timeout(200)
                     await title_input.press("Control+A")
                     await title_input.press("Backspace")
-                    await page.keyboard.type(title, delay=10)
+                    await page.keyboard.type(title[:100], delay=10)
                     logger.info("Successfully filled Pinterest title via keyboard type.")
                 else:
                     logger.warning("Could not find title input field.")
@@ -935,10 +966,11 @@ class PinterestClient:
             except Exception as e:
                 logger.error(f"Failed to click Publish button: {e}")
 
-            # 7. Wait for Success Toast/Confirmation
+            # 7. Wait for Success Toast/Confirmation + URL redirect
             logger.debug("Waiting for success confirmation...")
             try:
                 success_element = None
+                # Give Pinterest up to 25s total to show success toast (5 selectors x 5s each)
                 for selector in [
                     '[data-test-id="toast"]',
                     'div:has-text("You created a Pin!")',
@@ -955,7 +987,7 @@ class PinterestClient:
                         continue
 
                 if success_element:
-                    logger.info("Pin published successfully!")
+                    logger.info("Pin published successfully (toast confirmed)!")
                     for pin_link_selector in [
                         'a[href*="/pin/"]',
                         'a:has-text("See your Pin")',
@@ -969,10 +1001,32 @@ class PinterestClient:
                                 logger.info(f"Extracted Pin URL: {pin_url}")
                                 return pin_url
                 else:
-                    logger.warning("Success confirmation element did not appear, but pin might still be saved.")
+                    logger.warning("Toast not detected. Waiting up to 10s for page URL redirect to /pin/...")
+
+                # Fallback: wait for URL to change from /pin-builder/ to actual /pin/<id>/
+                try:
+                    await page.wait_for_function(
+                        "() => window.location.href.includes('/pin/') && !window.location.href.includes('pin-builder')",
+                        timeout=10000
+                    )
+                    final_url = page.url
+                    logger.info(f"Pin URL detected via redirect: {final_url}")
+                    return final_url
+                except Exception:
+                    # Check current URL one more time
+                    current_url = page.url
+                    if "/pin/" in current_url and "pin-builder" not in current_url:
+                        logger.info(f"Pin URL from current page: {current_url}")
+                        return current_url
+
+                    logger.warning("Could not confirm pin publish via toast or URL redirect. Pin may still be live on Pinterest.")
             except Exception as e:
                 logger.warning(f"Error checking success confirmation: {e}")
 
+            # Last resort: check if we're no longer on pin-builder
+            final_url = page.url
+            if "/pin/" in final_url and "pin-builder" not in final_url:
+                return final_url
             return "https://www.pinterest.com/pin-builder/"
 
         except PlaywrightTimeoutError as exc:
