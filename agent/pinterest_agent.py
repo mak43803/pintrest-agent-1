@@ -475,69 +475,6 @@ class PinterestAgent:
             # Re-raise the exception so it propagates normally to the pipeline/scheduler
             raise
 
-    def get_pending_linktree_product(self) -> dict | None:
-        """Query DB for the next product pending Linktree sync."""
-        with self.db.connection() as conn:
-            cursor = conn.execute("""
-                SELECT id, product_name, title, board_name, affiliate_link 
-                FROM products 
-                WHERE status IN ('Pinterest_Published', 'Linktree_Deferred') AND affiliate_link IS NOT NULL AND affiliate_link != ''
-                ORDER BY id ASC LIMIT 1
-            """)
-            row = cursor.fetchone()
-            return dict(row) if row else None
-
-    async def sync_pending_linktree_product(self, pending_row: dict | None = None) -> bool:
-        """Sync a pending product (status = 'Pinterest_Published') to Linktree Shop."""
-        if not self._is_initialized:
-            await self.initialize()
-
-        if not pending_row:
-            pending_row = self.get_pending_linktree_product()
-
-        if not pending_row:
-            return False
-
-        p_id = pending_row["id"]
-        p_title = pending_row["title"] or pending_row["product_name"]
-        p_url = pending_row["affiliate_link"]
-        p_board = pending_row["board_name"] or "General Beauty"
-        logger.info("⏳ RESUMING PENDING LINKTREE PRODUCT [ID #%d]: '%s' (Board: '%s'). Syncing to Linktree first before starting new pin...", p_id, p_title, p_board)
-
-        async def step_linktree_sync_recovery():
-            logger.info("STEP 6 (RECOVERY): Retrying Linktree collection addition...")
-            if not await self.linktree.is_logged_in():
-                logged_in = await self.linktree.login()
-                if not logged_in:
-                    raise Exception("Failed to log in to Linktree via Google.")
-
-            success = await self.linktree.add_link_to_collection(
-                title=p_title,
-                url=p_url,
-                collection_name=p_board
-            )
-            if not success:
-                raise Exception(f"Failed to add link to Linktree collection '{p_board}'.")
-            return True
-
-        try:
-            await self.execute_task_with_memory("Linktree Link Addition", step_linktree_sync_recovery)
-            with self.db.connection() as conn:
-                conn.execute("UPDATE products SET status = 'Published', retry_count = 0 WHERE id = ?", (p_id,))
-            logger.info("🎉 RECOVERY SUCCESSFUL! Product [ID #%d] successfully synced to Linktree!", p_id)
-            return True
-        except Exception as e:
-            logger.error(f"Linktree recovery addition failed for product ID #{p_id}: {e}")
-            with self.db.connection() as conn:
-                conn.execute("UPDATE products SET retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?", (p_id,))
-                cursor = conn.execute("SELECT retry_count FROM products WHERE id = ?", (p_id,))
-                r_row = cursor.fetchone()
-                r_count = r_row["retry_count"] if r_row else 1
-                if r_count >= 3:
-                    logger.warning(f"⚠️ Product ID #{p_id} failed Linktree sync {r_count} times. Deferring to unblock pipeline...")
-                    conn.execute("UPDATE products SET status = 'Linktree_Deferred' WHERE id = ?", (p_id,))
-            raise e
-
     @log_execution(module="agent.core")
     async def run_affiliate_pipeline(
         self,
@@ -547,14 +484,10 @@ class PinterestAgent:
     ) -> bool:
         """
         Executes the fully autonomous End-to-End workflow with quality checks and dynamic board selection.
+        Pinterest only — no Linktree.
         """
         if not self._is_initialized:
             await self.initialize()
-
-        # 0. CHECK FOR PENDING LINKTREE SYNC PRODUCTS FIRST!
-        pending_row = self.get_pending_linktree_product()
-        if pending_row:
-            return await self.sync_pending_linktree_product(pending_row)
 
         logger.info("Starting E2E Affiliate Pipeline for niche: '%s'", niche)
 
@@ -849,37 +782,15 @@ class PinterestAgent:
                 )
             )
 
-        # Step 6: Linktree Link Addition
-        async def step_linktree_addition():
-            logger.info("STEP 6: Adding affiliate link to Linktree Collection...")
-            if not await self.linktree.is_logged_in():
-                # Try logging in via Google
-                logged_in = await self.linktree.login()
-                if not logged_in:
-                    raise Exception("Failed to log in to Linktree via Google.")
-                    
-            success = await self.linktree.add_link_to_collection(
-                title=product_details.title,
-                url=product_details.affiliate_url,
-                collection_name=target_board
+        # Mark as fully Published (Pinterest only — no Linktree step)
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE products SET status = 'Published' WHERE affiliate_link = ?",
+                (product_details.affiliate_url,)
             )
-            if not success:
-                raise Exception("Failed to add link to Linktree collection.")
-            
-        try:
-            await self.execute_task_with_memory("Linktree Link Addition", step_linktree_addition)
-            
-            # Update status to fully Published since Linktree succeeded
-            with self.db.connection() as conn:
-                conn.execute(
-                    "UPDATE products SET status = 'Published' WHERE affiliate_link = ?",
-                    (product_details.affiliate_url,)
-                )
-        except Exception as e:
-            logger.error(f"Linktree addition failed: {e}")
-            raise
-        
+
         logger.info("🎉 SUCCESS! Pin published at: %s", pin_url)
+        return True
     def _get_unique_trend_fallback(self, live_trends: list[str], past_products: list[str], niche: str) -> str:
         """
         Safely returns a fresh, non-duplicate viral beauty product keyword 
@@ -896,26 +807,106 @@ class PinterestAgent:
                 logger.info(f"Fallback selected fresh live trend keyword: '{chosen}'")
                 return chosen
 
-        # 2. Curated viral beauty fallbacks
+        # 2. Curated viral beauty fallbacks (100+ Fresh US/UK/CA Virals for 2026)
         fallbacks = [
             "Biodance Bio-Collagen Real Deep Mask",
-            "Beauty of Joseon Relief Sun SPF 50",
-            "Medicube Zero Pore Pad 2.0",
-            "e.l.f. Glow Reviver Lip Oil",
-            "ONE/SIZE Patrick Starrr Waterproof Setting Spray",
-            "Hero Cosmetics Mighty Patch Original",
-            "Sol de Janeiro Cheirosa 68 Perfume Mist",
-            "Laneige Lip Sleeping Mask Berry",
-            "Glow Recipe Watermelon Niacinamide Dew Drops",
-            "Weleda Skin Food Original Ultra-Rich Cream",
-            "First Aid Beauty Ultra Repair Cream",
-            "Anua Heartleaf 77 Soothing Toner",
+            "Beauty of Joseon Relief Sun SPF 50 Rice Probiotics",
+            "Medicube Zero Pore Pad 2.0 Exfoliating Toner Pad",
             "COSRX Advanced Snail 96 Mucin Power Essence",
-            "Cosrx Acne Pimple Master Patch",
-            "Tree Hut Shea Sugar Body Scrub Vanilla",
+            "Anua Heartleaf 77 Soothing Toner",
+            "Skin1004 Madagascar Centella Hyalu-Cica Water-Fit Sun Serum",
+            "Torriden DIVE-IN Low Molecular Hyaluronic Acid Serum",
+            "d'Alba Piedmont White Truffle First Spray Serum",
+            "Kahi Wrinkle Bounce Multi Balm",
+            "TirTir Mask Fit Red Cushion Foundation",
+            "Illiyoon Ceramide Ato Concentrate Cream",
+            "Mixsoon Bean Essence Hydrating Exfoliator",
+            "Round Lab Birch Juice Moisturizing Sunscreen SPF 50+",
+            "Numbuzin No.3 Super Glowing Essence Toner",
+            "Haruharu Wonder Black Rice Hyaluronic Toner",
+            "I'm From Rice Toner Brightening Hydrating",
+            "Aestura Atobarrier 365 Cream Barrier Repair",
+            "Tocobo Bio Watery Sun Cream SPF50+",
+            "VT Cosmetics Reedle Shot 100 Boosting Shot",
+            "e.l.f. Glow Reviver Lip Oil",
+            "ONE/SIZE Patrick Starrr On 'Til Dawn Waterproof Setting Spray",
+            "Hero Cosmetics Mighty Patch Original Hydrocolloid Acne Patch",
+            "Summer Fridays Lip Butter Balm Vanilla",
+            "Summer Fridays Lip Butter Balm Cherry",
+            "Laneige Lip Sleeping Mask Berry",
+            "Glow Recipe Watermelon Glow Niacinamide Dew Drops",
+            "Rare Beauty Soft Pinch Liquid Blush",
+            "Dior Addict Lip Glow Oil 001 Pink",
+            "Sol de Janeiro Cheirosa 68 Beija Flor Perfume Mist",
+            "Sol de Janeiro Cheirosa 59 Delicia Drench Perfume Mist",
+            "Sol de Janeiro Cheirosa 62 Brazilian Crush Mist",
+            "Paula's Choice 2% BHA Liquid Salicylic Acid Exfoliant",
+            "Caudalie Vinoperfect Radiance Dark Spot Serum",
+            "Dyson Airwrap Multi-Styler Nickel Copper",
+            "Charlotte Tilbury Hollywood Flawless Filter",
+            "Charlotte Tilbury Magic Cream Hydrating Moisturizer",
+            "Refy Beauty Lip Gloss Clear",
+            "Refy Brow Sculpt Shape and Hold Gel",
+            "Saie Glowy Super Gel Lightweight Dewy Highlighter",
+            "Tower 28 Beauty SOS Daily Facial Rescue Spray",
+            "Supergoop! Unseen Sunscreen SPF 40",
+            "Fenty Beauty Gloss Bomb Universal Lip Luminizer",
+            "K18 Leave-In Molecular Repair Hair Mask",
+            "Olaplex No. 3 Hair Perfector Repairing Treatment",
+            "Color Wow Dream Coat Supernatural Anti-Frizz Spray",
+            "Color Wow Extra Strength Dream Coat",
             "Moroccanoil Treatment Original Hair Oil",
-            "Color Wow Dream Coat Anti-Frizz Treatment",
-            "The Ordinary Glycolic Acid 7% Toning Solution"
+            "Gisou Honey Infused Hair Oil",
+            "Ouai Detox Shampoo Clarifying Scalp Treatment",
+            "Amika Soulfood Nourishing Hair Mask",
+            "Shark FlexStyle Air Styling & Drying System",
+            "Tatcha The Dewy Skin Cream Plumping Hydrator",
+            "Drunk Elephant D-Bronzi Anti-Pollution Sunshine Drops",
+            "Weleda Skin Food Original Ultra-Rich Cream",
+            "The Ordinary Glycolic Acid 7% Toning Solution",
+            "La Roche-Posay Anthelios UVMune 400 Invisible Fluid SPF50+",
+            "La Roche-Posay Cicaplast Baume B5+ Soothing Repairing Balm",
+            "Avene Cicalfate+ Restorative Protective Cream",
+            "Bioderma Sensibio H2O Micellar Water Cleanser",
+            "CeraVe Hydrating Cleanser Non-Foaming",
+            "CeraVe Resurfacing Retinol Serum for Post-Acne Marks",
+            "L'Oreal Paris Revitalift Filler 1.5% Pure Hyaluronic Acid Serum",
+            "No7 Future Renew Damage Reversal Serum",
+            "Pixi Glow Tonic 5% Glycolic Acid Exfoliating Toner",
+            "Byoma Hydrating Serum Ceramide Tri-Complex",
+            "Byoma Creamy Jelly Cleanser",
+            "Simple Kind to Skin Hydrating Light Moisturiser",
+            "Embryolisse Lait-Creme Concentre Miracle Cream",
+            "First Aid Beauty Ultra Repair Cream Intense Hydration",
+            "The Ordinary Niacinamide 10% + Zinc 1%",
+            "The Ordinary AHA 30% + BHA 2% Peeling Solution",
+            "Nudestix Nudies Matte All Over Face Blush Color",
+            "Marc Anthony Strictly Curls Curl Defining Lotion",
+            "Burt's Bees 100% Natural Tinted Lip Balm",
+            "Vaseline Lip Therapy Rosy Lips Tin",
+            "Aquaphor Healing Ointment Dry Skin Protectant",
+            "Tree Hut Shea Sugar Body Scrub Tropical Mango",
+            "Tree Hut Shea Sugar Body Scrub Moroccan Rose",
+            "EOS Shea Better Body Lotion Vanilla Cashmere",
+            "Nécessaire The Body Wash Eucalyptus",
+            "L'Occitane Almond Shower Oil Hydrating Cleanser",
+            "Sol de Janeiro Bum Bum Cream Tightening Cream",
+            "PanOxyl Acne Foaming Wash 10% Benzoyl Peroxide",
+            "Cerave SA Cleanser Salicylic Acid Smooth Skin",
+            "e.l.f. Halo Glow Liquid Filter",
+            "e.l.f. Power Grip Primer + 4% Niacinamide",
+            "Milani Make It Last 16HR Setting Spray",
+            "Maybelline Lash Sensational Sky High Waterproof Mascara",
+            "NYX Fat Oil Lip Drip Lip Gloss",
+            "L'Oreal Paris Telescopic Lift Mascara",
+            "Essence Lash Princess False Lash Effect Mascara",
+            "Real Techniques Everyday Eye Essentials Makeup Brush Set",
+            "Touchland Power Mist Hydrating Hand Sanitizer Berry Bliss",
+            "Maison Francis Kurkdjian Baccarat Rouge 540 Dupe Lattafa Ana Abiyedh",
+            "Phlur Missing Person Eau de Parfum",
+            "Glossier You Eau de Parfum Solid",
+            "Sabrina Carpenter Sweet Tooth Eau de Parfum",
+            "Billie Eilish Eau de Parfum Vanilla Amber"
         ]
         
         available_fallbacks = [f for f in fallbacks if f.lower().strip() not in past_set]

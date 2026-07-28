@@ -278,7 +278,6 @@ async def main() -> None:
                         break
                 
                 TOTAL_CAMPAIGN_DAYS = 90
-                DAILY_PIN_LIMIT = 48
 
                 # ── 90-Day Campaign Tracker & Daily Limit Check ──
                 with agent.db.connection() as conn:
@@ -307,12 +306,7 @@ async def main() -> None:
                     await asyncio.sleep(3600)
                     continue
 
-                logger.info("📅 90-Day Campaign [Day %d/%d]: %d/%d Pins published today.", campaign_day, TOTAL_CAMPAIGN_DAYS, today_count, DAILY_PIN_LIMIT)
-                
-                if today_count >= DAILY_PIN_LIMIT:
-                    logger.info("🎯 Day %d/%d: Daily limit of %d pins reached for today! Sleeping until midnight reset...", campaign_day, TOTAL_CAMPAIGN_DAYS, DAILY_PIN_LIMIT)
-                    await asyncio.sleep(60)
-                    continue
+                logger.info("📅 90-Day Campaign [Day %d/%d]: %d Pins published today.", campaign_day, TOTAL_CAMPAIGN_DAYS, today_count)
                     
                 categories = [
                     # ── A-Z Skincare & Treatments ──
@@ -454,42 +448,6 @@ async def main() -> None:
                     "Mini skincare fridge for serums", "Rotating perfume stand organizer"
                 ]
 
-                # ── Check for Pending Linktree Products BEFORE doing Research ──
-                pending_item = agent.get_pending_linktree_product()
-                if pending_item:
-                    logger.info(
-                        "⏳ RESUMING PENDING LINKTREE PRODUCT [ID #%d]: '%s' (Board: '%s'). Syncing to Linktree first before starting new pin...",
-                        pending_item["id"],
-                        pending_item.get("title") or pending_item.get("product_name"),
-                        pending_item.get("board_name") or "General Beauty"
-                    )
-                    try:
-                        await agent.sync_pending_linktree_product(pending_item)
-                        consecutive_failures = 0
-                        logger.info("✅ Pending Linktree product ID #%d synced successfully. Checking remaining pending products...", pending_item["id"])
-                        await asyncio.sleep(2)
-                        continue
-                    except Exception as e:
-                        consecutive_failures += 1
-                        error_str = str(e).lower()
-                        logger.error(f"Pending Linktree sync error (failure #{consecutive_failures}): {e}")
-
-                        is_browser_crash = any(kw in error_str for kw in [
-                            "playwright", "browser", "page", "context", "crashed",
-                            "target closed", "connection refused", "websocket"
-                        ])
-                        if is_browser_crash:
-                            logger.warning("🔧 Browser crash detected during Linktree sync! Restarting browser...")
-                            try:
-                                await agent.browser_manager.close()
-                                await asyncio.sleep(5)
-                                await agent.browser_manager.initialize()
-                            except Exception:
-                                pass
-
-                        await asyncio.sleep(5)
-                        continue
-
                 # ── Trend Miner Integration: Priority Daily Top 5 Viral Check ──
                 trending_product = None
                 trending_category = None
@@ -616,10 +574,10 @@ async def main() -> None:
                     await asyncio.sleep(5)
                     continue
                     
-                # 3. Safe Zone Human Pacing: Random 20 to 30 minutes delay between pins (Non-stop for 90 Days)
+                # 3. Safe Zone Human Pacing: Random 15 to 25 minutes delay between pins (Non-stop for 90 Days)
                 import random
-                interval_mins = random.randint(20, 30)
-                logger.info("✅ Day %d/%d Pin completed! Today's Progress: %d/%d pins. Safe Zone: Next pin scheduled in %d minutes...", campaign_day, TOTAL_CAMPAIGN_DAYS, today_count + 1, DAILY_PIN_LIMIT, interval_mins)
+                interval_mins = random.randint(15, 25)
+                logger.info("✅ Day %d/%d Pin completed! Today's Progress: %d pins today. Safe Zone: Next pin scheduled in %d minutes (15-25 min random delay)...", campaign_day, TOTAL_CAMPAIGN_DAYS, today_count + 1, interval_mins)
                 await asyncio.sleep(interval_mins * 60)
                 
             # Exit outer loop cleanly if inner loop breaks without Exception
