@@ -103,15 +103,36 @@ class BrowserManager:
             
             logger.info("Launching Chromium (Isolated Persistent Context)...")
             from config.settings import PROJECT_ROOT
+            import os
             user_data_dir = str(PROJECT_ROOT / "browser_session")
-            
-            # Always use installed system Google Chrome channel to ensure Google OAuth compatibility
-            channel = "chrome"
-            
-            self._context = await self._playwright.chromium.launch_persistent_context(
+
+            # ── Linux/AWS: ensure DISPLAY is set for Xvfb virtual display ──
+            if os.name != "nt" and not os.environ.get("DISPLAY"):
+                os.environ["DISPLAY"] = ":99"
+                logger.info("Set DISPLAY=:99 for Linux/AWS headless environment.")
+
+            # ── Auto-detect headless: force headless=True if no real display ──
+            headless = self._settings.headless
+            if os.name != "nt" and os.environ.get("DISPLAY", "") in ("", ":99"):
+                # On AWS/Linux with Xvfb, use headed mode via virtual display
+                headless = False
+                logger.info("Linux/AWS mode: Using headed Chrome via Xvfb virtual display.")
+
+            # ── Determine browser channel: prefer Google Chrome, fallback to chromium ──
+            import shutil
+            chrome_paths = [
+                shutil.which("google-chrome"),
+                shutil.which("google-chrome-stable"),
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+            ]
+            has_chrome = any(p for p in chrome_paths if p and os.path.exists(p))
+            channel = "chrome" if has_chrome else None
+            logger.info("Browser channel: %s", channel or "chromium (default)")
+
+            launch_kwargs = dict(
                 user_data_dir=user_data_dir,
-                channel=channel,
-                headless=self._settings.headless,
+                headless=headless,
                 slow_mo=self._settings.slow_mo,
                 ignore_default_args=["--enable-automation"],
                 args=[
@@ -124,7 +145,14 @@ class BrowserManager:
                 ],
                 no_viewport=False,
             )
+            if channel:
+                launch_kwargs["channel"] = channel
+
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                **launch_kwargs
+            )
             self._browser = None  # No separate browser object for persistent context
+
 
             # Apply JS stealth evasions
             await apply_stealth(self._context)
