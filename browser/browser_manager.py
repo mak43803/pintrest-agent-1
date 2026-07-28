@@ -106,19 +106,16 @@ class BrowserManager:
             import os
             user_data_dir = str(PROJECT_ROOT / "browser_session")
 
-            # ── Linux/AWS: ensure DISPLAY is set for Xvfb virtual display ──
-            if os.name != "nt" and not os.environ.get("DISPLAY"):
-                os.environ["DISPLAY"] = ":99"
-                logger.info("Set DISPLAY=:99 for Linux/AWS headless environment.")
+            # ── Linux/AWS: ensure DISPLAY is set if headless=False ──
+            if os.name != "nt" and not self._settings.headless:
+                if not os.environ.get("DISPLAY"):
+                    os.environ["DISPLAY"] = ":99"
+                    logger.info("Set DISPLAY=:99 for Linux/AWS Xvfb display.")
 
-            # ── Auto-detect headless: force headless=True if no real display ──
             headless = self._settings.headless
-            if os.name != "nt" and os.environ.get("DISPLAY", "") in ("", ":99"):
-                # On AWS/Linux with Xvfb, use headed mode via virtual display
-                headless = False
-                logger.info("Linux/AWS mode: Using headed Chrome via Xvfb virtual display.")
+            logger.info("Browser headless mode: %s", headless)
 
-            # ── Determine browser channel: prefer Google Chrome, fallback to chromium ──
+            # ── Determine browser channel: prefer Google Chrome, fallback to Playwright Chromium ──
             import shutil
             chrome_paths = [
                 shutil.which("google-chrome"),
@@ -127,8 +124,12 @@ class BrowserManager:
                 "/usr/bin/google-chrome-stable",
             ]
             has_chrome = any(p for p in chrome_paths if p and os.path.exists(p))
-            channel = "chrome" if has_chrome else None
-            logger.info("Browser channel: %s", channel or "chromium (default)")
+            # In headless mode on Linux, use Playwright's bundled Chromium (more reliable)
+            if has_chrome and not (os.name != "nt" and headless):
+                channel = "chrome"
+            else:
+                channel = None
+            logger.info("Browser channel: %s", channel or "playwright-chromium")
 
             launch_kwargs = dict(
                 user_data_dir=user_data_dir,
