@@ -574,10 +574,10 @@ async def main() -> None:
                     await asyncio.sleep(5)
                     continue
                     
-                # 3. Safe Zone Human Pacing: Random 15 to 25 minutes delay between pins (Non-stop for 90 Days)
+                # 3. Safe Zone Human Pacing: Random 10 to 20 minutes delay between pins (Non-stop for 90 Days)
                 import random
-                interval_mins = random.randint(15, 25)
-                logger.info("✅ Day %d/%d Pin completed! Today's Progress: %d pins today. Safe Zone: Next pin scheduled in %d minutes (15-25 min random delay)...", campaign_day, TOTAL_CAMPAIGN_DAYS, today_count + 1, interval_mins)
+                interval_mins = random.randint(10, 20)
+                logger.info("✅ Day %d/%d Pin completed! Today's Progress: %d pins today. Safe Zone: Next pin scheduled in %d minutes (10-20 min random delay)...", campaign_day, TOTAL_CAMPAIGN_DAYS, today_count + 1, interval_mins)
                 await asyncio.sleep(interval_mins * 60)
                 
             # Exit outer loop cleanly if inner loop breaks without Exception

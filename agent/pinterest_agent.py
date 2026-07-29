@@ -93,6 +93,38 @@ def is_clickbait_spam(text_to_check: str) -> bool:
     ]
     return any(p in text_lower for p in spam_phrases)
 
+def is_fuzzy_duplicate_title(new_title: str, existing_titles: list[str]) -> bool:
+    """Check if new_title is a duplicate of any existing product title using normalized word token overlap."""
+    if not new_title:
+        return False
+    
+    stop_words = {
+        "for", "with", "and", "the", "in", "of", "a", "an", "to", "oz", "count", "ct", "pack", 
+        "set", "pcs", "piece", "mini", "ml", "g", "new", "best", "top", "great", "women", "men"
+    }
+    
+    def get_clean_tokens(t: str) -> set[str]:
+        words = re.findall(r'\b[a-z0-9]{3,}\b', t.lower())
+        return set(w for w in words if w not in stop_words)
+
+    new_tokens = get_clean_tokens(new_title)
+    if len(new_tokens) < 2:
+        return False
+
+    for ext in existing_titles:
+        ext_tokens = get_clean_tokens(ext)
+        if len(ext_tokens) < 2:
+            continue
+        
+        intersection = new_tokens.intersection(ext_tokens)
+        min_size = min(len(new_tokens), len(ext_tokens))
+        
+        if len(intersection) >= 3 and (len(intersection) / min_size) >= 0.70:
+            return True
+            
+    return False
+
+
 from config.settings import get_settings
 settings = get_settings()
 from database.database import Database
@@ -581,21 +613,38 @@ class PinterestAgent:
             new_asin = extract_asin(candidate_details.affiliate_url)
             is_duplicate = False
             
-            if new_asin:
-                with self.db.connection() as conn:
-                    cursor = conn.execute("SELECT affiliate_link FROM products WHERE affiliate_link IS NOT NULL")
-                    existing_links = [row["affiliate_link"] for row in cursor.fetchall()]
-                    
+            with self.db.connection() as conn:
+                cursor = conn.execute("SELECT product_name, title, affiliate_link FROM products")
+                all_db_rows = cursor.fetchall()
+                
+                existing_links = [r["affiliate_link"] for r in all_db_rows if r["affiliate_link"]]
+                existing_titles = [((r["title"] or "") + " " + (r["product_name"] or "")).strip() for r in all_db_rows]
+
+                # Check 1: ASIN match
+                if new_asin:
                     for link in existing_links:
                         if extract_asin(link) == new_asin:
                             is_duplicate = True
+                            logger.warning("Duplicate ASIN detected: %s", new_asin)
                             break
-            
-            if not is_duplicate:
-                with self.db.connection() as conn:
-                    chk = conn.execute("SELECT 1 FROM products WHERE LOWER(product_name) = LOWER(?) OR LOWER(title) = LOWER(?)", (current_keyword, candidate_details.title)).fetchone()
-                    if chk:
+
+                # Check 2: Exact keyword / title match
+                if not is_duplicate:
+                    c_kw_clean = (current_keyword or "").lower().strip()
+                    c_title_clean = (candidate_details.title or "").lower().strip()
+                    for row in all_db_rows:
+                        pname = (row["product_name"] or "").lower().strip()
+                        ptitle = (row["title"] or "").lower().strip()
+                        if (c_kw_clean and c_kw_clean in (pname, ptitle)) or (c_title_clean and c_title_clean in (pname, ptitle)):
+                            is_duplicate = True
+                            logger.warning("Exact title/keyword match duplicate detected: '%s'", c_title_clean)
+                            break
+
+                # Check 3: Fuzzy token similarity match
+                if not is_duplicate:
+                    if is_fuzzy_duplicate_title(candidate_details.title, existing_titles) or (current_keyword and is_fuzzy_duplicate_title(current_keyword, existing_titles)):
                         is_duplicate = True
+                        logger.warning("Fuzzy title similarity duplicate detected for candidate: '%s'", candidate_details.title)
 
             if is_duplicate:
                 logger.warning("⚠️ DUPLICATE PRODUCT DETECTED! '%s' (ASIN: %s) already published. Blacklisting and re-triggering Research for a new product...", candidate_details.title, new_asin or 'N/A')
