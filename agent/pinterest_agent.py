@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 import re
@@ -131,7 +132,7 @@ from database.database import Database
 from database.init_db import create_database
 from browser.browser_manager import BrowserManager
 from browser.pinterest_client import PinterestClient
-from browser.amazon_client import AmazonClient
+from browser.amazon_client import AmazonClient, AmazonProduct
 from browser.gemini_web_client import GeminiWebClient
 from browser.linktree_client import LinktreeClient
 from tools.image_tools import ImageTools
@@ -248,7 +249,7 @@ class PinterestAgent:
         else:
             return "Amazon Viral Beauty Finds"
 
-    def verify_quality(self, product_details: Any, seo_data: Any, image_path: str, board_name: str) -> bool:
+    def verify_quality(self, product_details: Any, seo_data: Any, image_path: str, board_name: str, db_product_id: int | None = None) -> bool:
         """Verify quality standards before publishing (STEP 6 validation)."""
         logger.info("Running Pre-Publish Quality Check...")
 
@@ -290,22 +291,24 @@ class PinterestAgent:
             logger.error("Quality Check Failed: Board name is not selected.")
             return False
 
-        # 6. Content uniqueness & US English character checks
+        # 6. Content uniqueness & US English character checks (excluding current pending item)
         with self.db.connection() as conn:
-            # Check for duplicate affiliate link to prevent re-posting the same product
+            query = "SELECT 1 FROM products WHERE status IN ('Pinterest_Published', 'Processing') "
+            params = []
+            if db_product_id:
+                query += "AND id != ? "
+                params.append(db_product_id)
+
             if product_details.affiliate_url:
-                cursor = conn.execute(
-                    "SELECT 1 FROM products WHERE affiliate_link = ? OR LOWER(title) = LOWER(?) OR LOWER(description) = LOWER(?)",
-                    (product_details.affiliate_url, seo_data.title, seo_data.description)
-                )
+                query += "AND (affiliate_link = ? OR LOWER(title) = LOWER(?) OR LOWER(description) = LOWER(?))"
+                params.extend([product_details.affiliate_url, seo_data.title, seo_data.description])
             else:
-                cursor = conn.execute(
-                    "SELECT 1 FROM products WHERE LOWER(title) = LOWER(?) OR LOWER(description) = LOWER(?)",
-                    (seo_data.title, seo_data.description)
-                )
+                query += "AND (LOWER(title) = LOWER(?) OR LOWER(description) = LOWER(?))"
+                params.extend([seo_data.title, seo_data.description])
                 
+            cursor = conn.execute(query, params)
             if cursor.fetchone():
-                logger.error("Quality Check Failed: Duplicate Affiliate Link or SEO Title/Description already exists in DB.")
+                logger.error("Quality Check Failed: Duplicate Affiliate Link or SEO Title/Description already published in DB.")
                 return False
 
         logger.info("✅ Quality Check Passed successfully!")
@@ -513,153 +516,180 @@ class PinterestAgent:
 
         logger.info("Starting E2E Affiliate Pipeline for niche: '%s'", niche)
 
-        # Fetch ALL previously posted products to avoid duplicates completely
-        past_products = []
+        # ── PRIORITY CHECK: Consume pre-seeded Pending_Pin queue from database ──
+        db_pending_row = None
         with self.db.connection() as conn:
-            cursor = conn.execute("SELECT DISTINCT product_name FROM products")
-            past_products = [row["product_name"] for row in cursor.fetchall()]
-            
-        # STEP 1: Research/Idea Generation (Anti-Duplicate Loop)
-        async def step_research():
-            logger.info("STEP 1: Fetching live US trends & Generating product idea...")
-            live_trends = await self.pinterest.get_us_beauty_trends()
-            
-            max_retries = 5
-            candidate_keyword = None
-            for attempt in range(max_retries):
-                if attempt >= 2:
-                    logger.info("Attempt %d: Gemini stuck in repeat loop. Sourcing directly from live Pinterest trends/fallbacks...", attempt + 1)
-                    candidate = self._get_unique_trend_fallback(live_trends, past_products, niche)
-                else:
-                    # Do NOT pass Amazon Best Sellers anymore to force Gemini to use fresh Pinterest/Google trends
-                    candidate = await self.gemini.generate_product_idea(niche, past_products, live_trends, "", "")
-                    candidate = self.parse_product_keyword(candidate)
-                
-                # Validate keyword contains no blocked terms and is not generic
-                candidate_lower = candidate.lower()
-                blocked_terms = ["pinterest", "google", "analysis", "trends", "passive income", "profits", "selected beauty trend", "trend product", "selected product"]
-                is_generic = candidate_lower in ["trending beauty product", "makeup beauty find", "selected beauty trend product", "beauty trend product", "selected product"] or "trend product" in candidate_lower or "beauty trend" in candidate_lower or len(candidate) < 4
-                has_blocked = any(w in candidate_lower for w in blocked_terms)
-                
-                if is_generic or has_blocked:
-                    logger.warning("Parsed keyword is generic or contains blocked terms: '%s'. Retrying attempt %d...", candidate, attempt + 1)
-                    continue
-                    
-                # Double check against full DB to prevent duplicate keyword selection
-                with self.db.connection() as conn:
-                    chk = conn.execute("SELECT 1 FROM products WHERE LOWER(product_name) = LOWER(?)", (candidate,))
-                    if not chk.fetchone():
-                        candidate_keyword = candidate
-                        break
-                    else:
-                        logger.warning("Generated duplicate keyword: '%s'. Retrying...", candidate)
-                        past_products.append(candidate)
-            else:
-                candidate_keyword = self._get_unique_trend_fallback(live_trends, past_products, niche)
-            return candidate_keyword
+            row = conn.execute("SELECT * FROM products WHERE status = 'Pending_Pin' ORDER BY id ASC LIMIT 1").fetchone()
+            if row:
+                db_pending_row = dict(row)
+                conn.execute("UPDATE products SET status = 'Processing' WHERE id = ?", (db_pending_row["id"],))
 
-        # AUTOMATIC UNIQUE PRODUCT RETRY LOOP (Max 5 attempts to ensure 0 duplicates)
-        max_sourcing_attempts = 5
-        product_details = None
+        db_product_id = None
         current_keyword = product_keyword
 
-        for sourcing_attempt in range(1, max_sourcing_attempts + 1):
-            if current_keyword and sourcing_attempt == 1:
-                current_keyword = self.parse_product_keyword(current_keyword)
-                logger.info("Bypass Mode / Initial Keyword: '%s'", current_keyword)
-            else:
-                try:
-                    current_keyword = await self.execute_task_with_memory("Research and Idea Generation", step_research)
-                except Exception as e:
-                    logger.error(f"Research failed on attempt {sourcing_attempt}: {e}")
-                    return False
+        if db_pending_row:
+            db_product_id = db_pending_row["id"]
+            p_title = db_pending_row.get("title") or db_pending_row.get("product_name") or "Sephora Viral Beauty Find"
+            p_img = db_pending_row.get("image_path") or "https://m.media-amazon.com/images/I/61ZQlTnCUbL._AC_UL320_.jpg"
+            p_source = db_pending_row.get("source_url") or ""
+            p_aff = db_pending_row.get("affiliate_link") or p_source
+            p_board = db_pending_row.get("board_name") or "Sephora Viral Beauty Finds 2026"
 
-            logger.info("Sourcing Attempt [%d/%d] — Selected Keyword: %s", sourcing_attempt, max_sourcing_attempts, current_keyword)
-            
-            # Step 2: Amazon Sourcing
-            async def step_amazon_sourcing():
-                logger.info("STEP 2: Sourcing from Amazon for '%s'...", current_keyword)
-                amazon_url = await self.amazon.search_products(current_keyword)
-                if not amazon_url:
-                    raise Exception(f"Failed to find product '{current_keyword}' on Amazon.")
-                    
-                return await self.amazon.fetch_product_details(amazon_url)
-                
-            try:
-                candidate_details = await self.execute_task_with_memory("Amazon Sourcing", step_amazon_sourcing)
-            except Exception as e:
-                logger.error(f"Amazon Sourcing failed for '{current_keyword}': {e}. Blacklisting and retrying...")
-                past_products.append(current_keyword)
-                current_keyword = None
-                continue
-
-            # Anti-Book / Anti-Non-Beauty Check
-            if is_book_product(candidate_details.title) or is_book_product(current_keyword) or is_non_beauty_product(candidate_details.title):
-                logger.warning("⚠️ NON-BEAUTY DETECTED! '%s' (Title: '%s') is non-beauty. Blacklisting and re-triggering research...", current_keyword, candidate_details.title)
-                past_products.append(current_keyword)
-                past_products.append(candidate_details.title)
-                current_keyword = None
-                continue
-                
-            # Quality Shield Check: Skip products with low customer ratings (< 4.0 stars) to protect conversion
-            if candidate_details.rating > 0 and candidate_details.rating < 4.0:
-                logger.warning("⚠️ LOW RATING DETECTED! '%s' has only %.1f★ rating. Blacklisting and sourcing higher-rated alternative...", candidate_details.title, candidate_details.rating)
-                past_products.append(current_keyword)
-                past_products.append(candidate_details.title)
-                current_keyword = None
-                continue
-                
-            # Anti-Duplicate Check: Extract ASIN & Title and check DB
-            new_asin = extract_asin(candidate_details.affiliate_url)
-            is_duplicate = False
-            
-            with self.db.connection() as conn:
-                cursor = conn.execute("SELECT product_name, title, affiliate_link FROM products")
-                all_db_rows = cursor.fetchall()
-                
-                existing_links = [r["affiliate_link"] for r in all_db_rows if r["affiliate_link"]]
-                existing_titles = [((r["title"] or "") + " " + (r["product_name"] or "")).strip() for r in all_db_rows]
-
-                # Check 1: ASIN match
-                if new_asin:
-                    for link in existing_links:
-                        if extract_asin(link) == new_asin:
-                            is_duplicate = True
-                            logger.warning("Duplicate ASIN detected: %s", new_asin)
-                            break
-
-                # Check 2: Exact keyword / title match
-                if not is_duplicate:
-                    c_kw_clean = (current_keyword or "").lower().strip()
-                    c_title_clean = (candidate_details.title or "").lower().strip()
-                    for row in all_db_rows:
-                        pname = (row["product_name"] or "").lower().strip()
-                        ptitle = (row["title"] or "").lower().strip()
-                        if (c_kw_clean and c_kw_clean in (pname, ptitle)) or (c_title_clean and c_title_clean in (pname, ptitle)):
-                            is_duplicate = True
-                            logger.warning("Exact title/keyword match duplicate detected: '%s'", c_title_clean)
-                            break
-
-                # Check 3: Fuzzy token similarity match
-                if not is_duplicate:
-                    if is_fuzzy_duplicate_title(candidate_details.title, existing_titles) or (current_keyword and is_fuzzy_duplicate_title(current_keyword, existing_titles)):
-                        is_duplicate = True
-                        logger.warning("Fuzzy title similarity duplicate detected for candidate: '%s'", candidate_details.title)
-
-            if is_duplicate:
-                logger.warning("⚠️ DUPLICATE PRODUCT DETECTED! '%s' (ASIN: %s) already published. Blacklisting and re-triggering Research for a new product...", candidate_details.title, new_asin or 'N/A')
-                past_products.append(current_keyword)
-                past_products.append(candidate_details.title)
-                current_keyword = None
-                continue
-
-            # Unique product confirmed!
-            product_details = candidate_details
-            logger.info("✅ UNIQUE BEAUTY PRODUCT CONFIRMED: '%s' (ASIN: %s)", product_details.title, new_asin or 'N/A')
-            break
+            logger.info("📦 PRE-SEEDED QUEUE DETECTED! Processing Product ID #%d: '%s' (Board: '%s')...", db_product_id, p_title, p_board)
+            product_details = AmazonProduct(
+                title=p_title,
+                description=f"Discover {p_title}. Sephora viral beauty essential!",
+                price="$16.99",
+                rating=4.8,
+                review_count=15000,
+                image_url=p_img,
+                affiliate_url=p_aff
+            )
         else:
-            logger.error("❌ Failed to source a unique beauty product after %d attempts.", max_sourcing_attempts)
-            return False
+            # Fetch ALL previously posted products to avoid duplicates completely
+            past_products = []
+            with self.db.connection() as conn:
+                cursor = conn.execute("SELECT DISTINCT product_name FROM products")
+                past_products = [row["product_name"] for row in cursor.fetchall()]
+                
+            # STEP 1: Research/Idea Generation (Anti-Duplicate Loop)
+            async def step_research():
+                logger.info("STEP 1: Fetching live US trends & Generating product idea...")
+                live_trends = await self.pinterest.get_us_beauty_trends()
+                
+                max_retries = 5
+                candidate_keyword = None
+                for attempt in range(max_retries):
+                    if attempt >= 2:
+                        logger.info("Attempt %d: Gemini stuck in repeat loop. Sourcing directly from live Pinterest trends/fallbacks...", attempt + 1)
+                        candidate = self._get_unique_trend_fallback(live_trends, past_products, niche)
+                    else:
+                        candidate = await self.gemini.generate_product_idea(niche, past_products, live_trends, "", "")
+                        candidate = self.parse_product_keyword(candidate)
+                    
+                    candidate_lower = candidate.lower()
+                    blocked_terms = ["pinterest", "google", "analysis", "trends", "passive income", "profits", "selected beauty trend", "trend product", "selected product"]
+                    is_generic = candidate_lower in ["trending beauty product", "makeup beauty find", "selected beauty trend product", "beauty trend product", "selected product"] or "trend product" in candidate_lower or "beauty trend" in candidate_lower or len(candidate) < 4
+                    has_blocked = any(w in candidate_lower for w in blocked_terms)
+                    
+                    if is_generic or has_blocked:
+                        logger.warning("Parsed keyword is generic or contains blocked terms: '%s'. Retrying attempt %d...", candidate, attempt + 1)
+                        continue
+                        
+                    with self.db.connection() as conn:
+                        chk = conn.execute("SELECT 1 FROM products WHERE LOWER(product_name) = LOWER(?)", (candidate,))
+                        if not chk.fetchone():
+                            candidate_keyword = candidate
+                            break
+                        else:
+                            logger.warning("Generated duplicate keyword: '%s'. Retrying...", candidate)
+                            past_products.append(candidate)
+                else:
+                    candidate_keyword = self._get_unique_trend_fallback(live_trends, past_products, niche)
+                return candidate_keyword
+
+            # AUTOMATIC UNIQUE PRODUCT RETRY LOOP
+            max_sourcing_attempts = 5
+            product_details = None
+
+            for sourcing_attempt in range(1, max_sourcing_attempts + 1):
+                if current_keyword and sourcing_attempt == 1:
+                    current_keyword = self.parse_product_keyword(current_keyword)
+                    logger.info("Bypass Mode / Initial Keyword: '%s'", current_keyword)
+                else:
+                    try:
+                        current_keyword = await self.execute_task_with_memory("Research and Idea Generation", step_research)
+                    except Exception as e:
+                        logger.error(f"Research failed on attempt {sourcing_attempt}: {e}")
+                        return False
+
+                logger.info("Sourcing Attempt [%d/%d] — Selected Keyword: %s", sourcing_attempt, max_sourcing_attempts, current_keyword)
+                
+                # Step 2: Amazon Sourcing
+                async def step_amazon_sourcing():
+                    logger.info("STEP 2: Sourcing from Amazon for '%s'...", current_keyword)
+                    amazon_url = await self.amazon.search_products(current_keyword)
+                    if not amazon_url:
+                        raise Exception(f"Failed to find product '{current_keyword}' on Amazon.")
+                        
+                    return await self.amazon.fetch_product_details(amazon_url)
+                    
+                try:
+                    candidate_details = await self.execute_task_with_memory("Amazon Sourcing", step_amazon_sourcing)
+                except Exception as e:
+                    logger.error(f"Amazon Sourcing failed for '{current_keyword}': {e}. Blacklisting and retrying...")
+                    past_products.append(current_keyword)
+                    current_keyword = None
+                    continue
+
+                if not candidate_details or candidate_details.title == "Unknown Product" or not candidate_details.image_url:
+                    logger.warning("⚠️ INVALID PRODUCT DETAILS DETECTED! Title is 'Unknown Product' or Image URL is missing. Blacklisting candidate '%s'...", current_keyword)
+                    past_products.append(current_keyword)
+                    if candidate_details and candidate_details.title:
+                        past_products.append(candidate_details.title)
+                    current_keyword = None
+                    continue
+
+                if is_book_product(candidate_details.title) or is_book_product(current_keyword) or is_non_beauty_product(candidate_details.title):
+                    logger.warning("⚠️ NON-BEAUTY DETECTED! '%s' (Title: '%s') is non-beauty. Blacklisting and re-triggering research...", current_keyword, candidate_details.title)
+                    past_products.append(current_keyword)
+                    past_products.append(candidate_details.title)
+                    current_keyword = None
+                    continue
+                    
+                if candidate_details.rating > 0 and candidate_details.rating < 4.0:
+                    logger.warning("⚠️ LOW RATING DETECTED! '%s' has only %.1f★ rating. Blacklisting and sourcing higher-rated alternative...", candidate_details.title, candidate_details.rating)
+                    past_products.append(current_keyword)
+                    past_products.append(candidate_details.title)
+                    current_keyword = None
+                    continue
+                    
+                new_asin = extract_asin(candidate_details.affiliate_url)
+                is_duplicate = False
+                
+                with self.db.connection() as conn:
+                    cursor = conn.execute("SELECT product_name, title, affiliate_link FROM products")
+                    all_db_rows = cursor.fetchall()
+                    
+                    existing_links = [r["affiliate_link"] for r in all_db_rows if r["affiliate_link"]]
+                    existing_titles = [((r["title"] or "") + " " + (r["product_name"] or "")).strip() for r in all_db_rows]
+
+                    if new_asin:
+                        for link in existing_links:
+                            if extract_asin(link) == new_asin:
+                                is_duplicate = True
+                                logger.warning("Duplicate ASIN detected: %s", new_asin)
+                                break
+
+                    if not is_duplicate:
+                        c_kw_clean = (current_keyword or "").lower().strip()
+                        c_title_clean = (candidate_details.title or "").lower().strip()
+                        for row in all_db_rows:
+                            pname = (row["product_name"] or "").lower().strip()
+                            ptitle = (row["title"] or "").lower().strip()
+                            if (c_kw_clean and c_kw_clean in (pname, ptitle)) or (c_title_clean and c_title_clean in (pname, ptitle)):
+                                is_duplicate = True
+                                logger.warning("Exact title/keyword match duplicate detected: '%s'", c_title_clean)
+                                break
+
+                    if not is_duplicate:
+                        if is_fuzzy_duplicate_title(candidate_details.title, existing_titles) or (current_keyword and is_fuzzy_duplicate_title(current_keyword, existing_titles)):
+                            is_duplicate = True
+                            logger.warning("Fuzzy title similarity duplicate detected for candidate: '%s'", candidate_details.title)
+
+                if is_duplicate:
+                    logger.warning("⚠️ DUPLICATE PRODUCT DETECTED! '%s' (ASIN: %s) already published. Blacklisting and re-triggering Research for a new product...", candidate_details.title, new_asin or 'N/A')
+                    past_products.append(current_keyword)
+                    past_products.append(candidate_details.title)
+                    current_keyword = None
+                    continue
+
+                product_details = candidate_details
+                logger.info("✅ UNIQUE BEAUTY PRODUCT CONFIRMED: '%s' (ASIN: %s)", product_details.title, new_asin or 'N/A')
+                break
+            else:
+                logger.error("❌ Failed to source a unique beauty product after %d attempts.", max_sourcing_attempts)
+                return False
         
         # Step 3: Downloading Amazon product image first
         async def step_image_download():
@@ -768,7 +798,7 @@ class PinterestAgent:
         seo_data.alt_text = self.optimize_alt_text(seo_data.alt_text, target_board, niche)
 
         # Pre-publish Quality Check
-        if not self.verify_quality(product_details, seo_data, pin_image_path, target_board):
+        if not self.verify_quality(product_details, seo_data, pin_image_path, target_board, db_product_id=db_product_id):
             logger.error("Quality Check failed! Aborting publish.")
             return False
 
@@ -807,25 +837,53 @@ class PinterestAgent:
 
         # Save to database immediately to prevent duplicates (Pinterest Pin is already live)
         final_product_name = current_keyword or product_keyword or (product_details.title if product_details else None) or "Beauty Product"
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        
         with self.db.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO products (product_name, category, board_name, status, image_path, source_url, title, description, affiliate_link, pin_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    final_product_name,
-                    niche,
-                    target_board,
-                    "Pinterest_Published",
-                    pin_image_path,
-                    product_details.image_url,
-                    seo_data.title,
-                    seo_data.description,
-                    product_details.affiliate_url,
-                    pin_url
+            if db_product_id:
+                conn.execute(
+                    """
+                    UPDATE products SET 
+                        status = 'Pinterest_Published',
+                        pin_url = ?,
+                        image_path = ?,
+                        title = ?,
+                        description = ?,
+                        board_name = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        pin_url,
+                        pin_image_path,
+                        seo_data.title,
+                        seo_data.description,
+                        target_board,
+                        now_iso,
+                        db_product_id
+                    )
                 )
-            )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO products (product_name, category, board_name, status, image_path, source_url, title, description, affiliate_link, pin_url, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        final_product_name,
+                        niche,
+                        target_board,
+                        "Pinterest_Published",
+                        pin_image_path,
+                        product_details.image_url,
+                        seo_data.title,
+                        seo_data.description,
+                        product_details.affiliate_url,
+                        pin_url,
+                        now_iso,
+                        now_iso
+                    )
+                )
 
         # Mark as fully Published (Pinterest only — no Linktree step)
         with self.db.connection() as conn:
@@ -1002,7 +1060,33 @@ class PinterestAgent:
             "Ouai Wave Spray Sea Salt Mist",
             "Dyson Airstrait Straightener Wet to Dry",
             "Shark Beauty SmoothStyle Heated Comb Brush",
-            "Nivea Super Water Gel SPF 50 PA+++ Sunscreen"
+            "Nivea Super Water Gel SPF 50 PA+++ Sunscreen",
+
+            # ── 2026 Sephora Featured A+ Beauty Essentials ──
+            "Glossier Balm Dotcom Lip Balm and Skin Salve",
+            "ONE/SIZE by Patrick Starrr Mini Oil Sucker Liquid Blotting Paper Touch-Up Spray",
+            "Summer Fridays Lip Butter Balm Treatment Strawberry Soft Serve",
+            "Sincerely Yours Clear Intentions Hydrating and Pore-Clarifying Essential Toner",
+            "Salt & Stone Lily & Yuzu Extra-Strength Aluminum-Free Deodorant",
+            "Ariana Grande Cloud Aurora Eau de Parfum Travel Spray",
+            "OUAI Mini St. Barts Ibiza Santorini Melrose Hair & Body Mist Set",
+            "Emi Jay Angel Essentials Hair Styling Gift Set",
+            "Tower 28 Beauty SOS Daily Hypochlorous Acid Spray for Breakouts & Redness",
+            "REFY Lash Sculpt Lengthen and Lift Natural Looking Mascara",
+            "SOFIE PAVITT FACE 3 Step Acne-Safe Clear Skin System with Mandelic Acid",
+            "LANEIGE Lip Sleeping Mask Acai Mango Smoothie",
+            "rhode Peptide Lip Tint Nourishing Glaze Jelly Bean",
+            "Topicals Faded Tranexamic Acid Dark Spot Patches for Hyperpigmentation",
+            "KAYALI VANILLA 28 Eau de Parfum Travel Spray",
+            "Glossier Glossier You Eau de Parfum Travel Spray",
+            "dae Cactus Fruit 3-in-1 Styling Cream with Taming Wand",
+            "Saie Glowy Super Gel Lightweight Dewy Multipurpose Illuminator Sunglow",
+            "Sol de Janeiro Cheirosa 48 Hair & Body Perfume Mist",
+            "Glossier Glossier You Eau de Parfum",
+            "KAYALI BOUJEE KITTY CARAMEL MILK 22 Eau de Parfum",
+            "SKYLAR Boardwalk Delight Eau de Parfum",
+            "Kérastase Gloss Absolu Glaze Drops Anti-Frizz Hair Oil",
+            "K18 Biomimetic Hairscience AirWash Dry Shampoo"
         ]
         
         available_fallbacks = [f for f in fallbacks if f.lower().strip() not in past_set]

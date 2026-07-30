@@ -44,19 +44,18 @@ class LinktreeClient:
                 await page.keyboard.press("Escape")
                 await page.wait_for_timeout(500)
 
-            # Check if left profile menu drawer is open (contains 'Create new Linktree' text)
-            drawer_loc = page.locator('*:has-text("Create new Linktree"), *:has-text("Share feedback")')
-            drawer_attempts = 0
-            while await drawer_loc.count() > 0 and drawer_attempts < 6:
-                drawer_attempts += 1
-                logger.info(f"Left profile drawer is open (attempt {drawer_attempts}). Toggling profile header button (80, 118) to close...")
-                await page.mouse.click(80, 118)
+            # Click backdrop at (700, 300) to close any open profile drawer or floating menu
+            await page.mouse.click(700, 300)
+            await page.wait_for_timeout(500)
+
+            # Check if a modal or popover overlay is open and dismiss it cleanly
+            overlay_loc = page.locator('[data-state="open"], [role="menu"]:visible, [role="popover"]:visible').filter(visible=True)
+            if await overlay_loc.count() > 0:
+                logger.info("Dismissing open popup menu/drawer overlay...")
+                await page.keyboard.press("Escape")
                 await page.wait_for_timeout(500)
                 await page.mouse.click(700, 300)
                 await page.wait_for_timeout(500)
-                await page.keyboard.press("Escape")
-                await page.wait_for_timeout(800)
-                drawer_loc = page.locator('*:has-text("Create new Linktree"), *:has-text("Share feedback")')
 
             # Dismiss close buttons for tips/announcements
             for close_selector in [
@@ -252,8 +251,22 @@ class LinktreeClient:
         try:
             logger.info(f"Adding product to Linktree Shop  │  title='{title}'  url='{url}'  collection='{collection_name}'")
             
-            # Helper to navigate cleanly to Shop tab without triggering full reloads that drop session
+            # Helper to navigate cleanly to Shop tab using SPA navigation or networkidle fallback
             async def navigate_to_shop_tab():
+                current_url = page.url.lower()
+                if "admin/shop" in current_url and "login" not in current_url:
+                    logger.info("Already on Linktree Shop page URL.")
+                    return
+
+                # If not on admin at all, navigate to main admin page first to load SPA bundle
+                if "admin" not in current_url or "login" in current_url or "universal-login" in current_url:
+                    logger.info("Navigating to Linktree Admin root to load SPA app bundle...")
+                    try:
+                        await page.goto(f"{self.BASE_URL}/admin", wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_timeout(4000)
+                    except Exception as nav_err:
+                        logger.warning(f"Navigating to admin root warning: {nav_err}")
+
                 current_url = page.url.lower()
                 if "login" in current_url or "universal-login" in current_url:
                     logger.warning("Redirected to login page. Performing Linktree login...")
@@ -262,8 +275,8 @@ class LinktreeClient:
                         raise Exception("Failed to log in to Linktree via Google.")
                     await page.wait_for_timeout(3000)
 
+                # Attempt SPA navigation via Shop tab link in sidebar
                 current_url = page.url.lower()
-                # If authenticated on admin, attempt clicking the 'Shop' tab link in navbar (SPA navigation)
                 if "admin" in current_url and "login" not in current_url:
                     shop_nav_selectors = [
                         'a[href*="/admin/shop"]',
@@ -283,29 +296,14 @@ class LinktreeClient:
                         except Exception:
                             continue
 
-                # If direct tab click was skipped or failed to change URL to admin/shop, try goto
+                # If direct tab click was skipped or failed to change URL to admin/shop, try networkidle goto
                 if "admin/shop" not in page.url.lower():
-                    logger.info("Navigating to Linktree Shop Admin page URL...")
-                    await page.goto(f"{self.BASE_URL}/admin/shop", wait_until="domcontentloaded", timeout=120000)
+                    logger.info("Navigating to Linktree Shop Admin page URL (networkidle wait)...")
+                    try:
+                        await page.goto(f"{self.BASE_URL}/admin/shop", wait_until="networkidle", timeout=60000)
+                    except Exception:
+                        await page.goto(f"{self.BASE_URL}/admin/shop", wait_until="domcontentloaded", timeout=60000)
                     await page.wait_for_timeout(5000)
-
-                # Re-check URL after navigation
-                current_url = page.url.lower()
-                if "login" in current_url or "universal-login" in current_url:
-                    logger.warning("Redirected to login page post-navigation. Re-attempting login...")
-                    logged_in = await self.login()
-                    if not logged_in:
-                        raise Exception("Failed to log in to Linktree via Google.")
-                    await page.wait_for_timeout(3000)
-                    for nav_sel in ['a[href*="/admin/shop"]', 'a:has-text("Shop")', 'button:has-text("Shop")']:
-                        try:
-                            shop_link = page.locator(nav_sel).filter(visible=True).first
-                            if await shop_link.count() > 0:
-                                await shop_link.click(force=True)
-                                await page.wait_for_timeout(5000)
-                                break
-                        except Exception:
-                            pass
 
             await navigate_to_shop_tab()
 
@@ -313,34 +311,27 @@ class LinktreeClient:
             logger.info("Dismissing open drawers/overlays to unfreeze Shop dashboard render...")
             await self._dismiss_overlays_and_drawers(page)
 
-            # Wait up to 3 minutes (180s) for Linktree Shop React rendering and GraphQL data hydration to complete
-            logger.info("Waiting for Linktree Shop page React rendering and data loading to complete (up to 3 minutes)...")
-            for attempt in range(120):  # 120 x 1.5s = 180 seconds (3 minutes)
-                await page.wait_for_timeout(1500)
-                current_url = page.url.lower()
-                if "login" in current_url or "universal-login" in current_url:
-                    logger.warning("Session lost during shop wait. Re-authenticating...")
-                    await navigate_to_shop_tab()
-                    break
+            # Wait 5 seconds for Linktree Shop React rendering and GraphQL data hydration to settle
+            logger.info("Waiting for Linktree Shop page React rendering and data loading to settle (5s)...")
+            await page.wait_for_timeout(5000)
+
+            # Ensure 'Manage' tab is clicked to hydrate existing collections (collections only show on Manage tab)
+            for tab_sel in ['button:has-text("Manage")', 'a:has-text("Manage")', '[role="tab"]:has-text("Manage")']:
                 try:
-                    # Check if the giant purple + Add button OR real collection cards have rendered on canvas (x > 230, y > 150)
-                    loaded = await page.evaluate("""() => {
-                        const btns = Array.from(document.querySelectorAll('button, [role="button"], a, div')).filter(el => {
-                            const r = el.getBoundingClientRect();
-                            const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                            return r.x > 230 && r.y > 150 && r.width > 200 && (t === '+ add' || t === 'add' || t.includes('+ add'));
-                        });
-                        const mainTxt = (document.querySelector('main') || document.body).innerText || '';
-                        const hasCards = mainTxt.includes('CTR') || mainTxt.includes('0 Clicks') || mainTxt.includes('1 Product');
-                        return btns.length > 0 || hasCards;
-                    }""")
-                    if loaded:
-                        logger.info(f"Linktree Shop page loaded successfully after {(attempt + 1) * 1.5:.1f} seconds!")
+                    tab_btn = page.locator(tab_sel).filter(visible=True).first
+                    if await tab_btn.count() > 0:
+                        logger.info(f"Clicking Shop 'Manage' tab button to hydrate collections: {tab_sel}")
+                        await tab_btn.click(force=True)
+                        await page.wait_for_timeout(4000)
                         break
-                    if (attempt + 1) % 10 == 0:
-                        logger.info(f"Still waiting for Shop page to render ({int((attempt + 1) * 1.5)}s elapsed)...")
-                except Exception as e:
-                    logger.debug(f"Shop load check error: {e}")
+                except Exception as tab_err:
+                    logger.debug(f"Tab click check: {tab_err}")
+
+            # Quick check to ensure page is still authenticated
+            current_url = page.url.lower()
+            if "login" in current_url or "universal-login" in current_url:
+                logger.warning("Session lost during shop wait. Re-authenticating...")
+                await navigate_to_shop_tab()
 
 
             # Slowly scroll down to load any lazy-loaded collections on page
@@ -425,7 +416,9 @@ class LinktreeClient:
                 
                 if not coll_exists:
                     logger.info(f"Collection '{collection_name_clean}' not found on dashboard.")
-                    logger.info("Scrolling back to top of all containers to bring '+ Add' button into viewport...")
+                    logger.info("Opening 'Add to your Shop' modal to create new collection...")
+                    
+                    # Scroll back to top to access the + Add button
                     await page.evaluate("""() => {
                         window.scrollTo(0, 0);
                         document.documentElement.scrollTop = 0;
@@ -437,117 +430,73 @@ class LinktreeClient:
                     }""")
                     await page.wait_for_timeout(3000)
 
-                    # Dismiss any accidental dialogs (Share your Linktree, etc.) before looking for + Add button
-                    for close_sel in ['[aria-label="Close"]', 'button[aria-label="Close"]', 'button:has-text("Close")', 'button:has-text("Got it")', 'button:has-text("Done")']:
-                        try:
-                            close_btns = page.locator(close_sel).filter(visible=True)
-                            if await close_btns.count() > 0:
-                                logger.info(f"Closing accidental dialog via: {close_sel}")
-                                await close_btns.first.click(force=True)
-                                await page.wait_for_timeout(1000)
-                                break
-                        except Exception:
-                            pass
-
+                    # Click the + Add button on Manage tab to open "Add to your Shop" modal
                     coll_btn = None
                     for add_attempt in range(5):
-                        # Check if "Add to your Shop" modal is already open
-                        dialog_open = await page.locator('[role="dialog"]:visible, *:has-text("Add to your Shop")').filter(visible=True).count() > 0
-                        if not dialog_open:
-                            logger.info("Searching for main canvas purple '+ Add' button via JS...")
-                            found_btn_info = await page.evaluate("""() => {
-                                // Scan ALL elements for the one with '+ add' or 'add' text in main canvas (x > 200, y > 50)
-                                const allEls = Array.from(document.querySelectorAll('button, [role="button"], a, div'));
-                                let candidates = [];
-                                for (const el of allEls) {
-                                    const r = el.getBoundingClientRect();
-                                    if (r.width < 80 || r.height < 15) continue;
-                                    const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                    // Canvas area: x > 200, y > 50 (main canvas area)
-                                    if (r.x > 200 && r.y > 50 && (t === '+ add' || t === 'add' || t.includes('+ add'))) {
-                                        candidates.push({
-                                            x: r.x, y: r.y, w: r.width, h: r.height,
-                                            txt: (el.innerText || el.textContent || '').trim().substring(0, 50),
-                                            tag: el.tagName,
-                                            cls: el.className.toString().substring(0, 50)
-                                        });
-                                    }
-                                }
-                                // Sort by width descending (widest candidate = large purple Add pill bar)
-                                candidates.sort((a, b) => b.w - a.w);
-                                return candidates;
-                            }""")
-                            logger.info(f"Canvas add candidates (attempt {add_attempt+1}): {found_btn_info}")
-
-                            if found_btn_info:
-                                best = found_btn_info[0]
-                                logger.info(f"Clicking best canvas add candidate: {best}")
-                                cx = best['x'] + best['w'] / 2
-                                cy = best['y'] + best['h'] / 2
-                                await page.mouse.click(cx, cy)
-                                logger.info(f"Clicked at coordinates ({cx:.0f}, {cy:.0f})")
-                            else:
-                                # Fallback locator try via Playwright
-                                try:
-                                    add_btn_pw = page.locator('button:has-text("+ Add"), button:has-text("Add")').filter(visible=True)
-                                    cnt = await add_btn_pw.count()
-                                    for i in range(cnt):
-                                        c = add_btn_pw.nth(i)
-                                        bb = await c.bounding_box()
-                                        if bb and bb['x'] > 200 and bb['y'] > 50:
-                                            logger.info(f"Found + Add button via Playwright locator at bbox={bb}. Clicking...")
-                                            await c.click(force=True)
-                                            break
-                                except Exception as pw_err:
-                                    logger.warning(f"Playwright locator fallback error: {pw_err}")
-
-                            await page.wait_for_timeout(4000)
-                        # Check for 'Collection' menu option in opened Add menu ("Add to your Shop" modal)
-                        logger.info("Selecting 'Collection' option from Add menu...")
-                        try:
-                            # Try native text lookup for Option 1 card
-                            card_opt = page.get_by_text("Organize Linked products").first
-                            if await card_opt.is_visible():
-                                coll_btn = card_opt
-                                logger.info("Found Collection option card via page.get_by_text('Organize Linked products').")
-                                break
-                        except Exception:
-                            pass
-
-                        if not coll_btn:
-                            locs = page.locator('*:has-text("Organize Linked products")').filter(visible=True)
-                            count = await locs.count()
-                            best_cand = None
-                            best_len = 999999
-                            for i in range(count):
-                                cand = locs.nth(i)
-                                txt = (await cand.inner_text()).strip()
-                                if "organize linked products" in txt.lower() and len(txt) < best_len:
-                                    best_len = len(txt)
-                                    best_cand = cand
-
-                            if best_cand:
-                                coll_btn = best_cand
-                                logger.info(f"Found exact Collection option card (inner text length: {best_len}).")
-                                break
-
-                    if not coll_btn:
-                        logger.info("Fallback lookup for 'Collection' text...")
-                        for sel in [
-                            'button:has-text("Collection")',
-                            'div[role="button"]:has-text("Collection")',
-                            'p:has-text("Collection")',
-                            'span:has-text("Collection")'
+                        logger.info(f"Clicking + Add button (attempt {add_attempt+1}/5)...")
+                        for btn_sel in [
+                            'button.inline-flex:has-text("Add")',
+                            'button:has-text("+ Add")',
+                            'button:has-text("Add"):not(:has-text("Manage")):not(:has-text("Products")):not(:has-text("Settings"))',
                         ]:
-                            loc = page.locator(sel).filter(visible=True).first
-                            if await loc.count() > 0:
-                                coll_btn = loc
-                                break
-
+                            try:
+                                btn = page.locator(btn_sel).filter(visible=True)
+                                count = await btn.count()
+                                if count > 0:
+                                    target = btn.last if count > 1 else btn.first
+                                    box = await target.bounding_box()
+                                    if box and box['y'] > 100 and box['y'] < 500:
+                                        await target.click(force=True)
+                                        logger.info(f"Clicked Add button via '{btn_sel}' at y={box['y']:.0f}")
+                                        break
+                            except Exception:
+                                pass
+                        
+                        await page.wait_for_timeout(4000)
+                        
+                        # Look for the "Collection" option card in "Add to your Shop" modal
+                        # Text: "Collection" with subtitle "Organize Linked products into a collection"
+                        logger.info("Looking for 'Collection' option in 'Add to your Shop' modal...")
+                        for coll_sel in [
+                            'text="Collection"',
+                            '*:has-text("Organize Linked products into a collection")',
+                            '*:has-text("Organize Linked products")',
+                        ]:
+                            try:
+                                candidates = page.locator(coll_sel).filter(visible=True)
+                                cand_count = await candidates.count()
+                                if cand_count > 0:
+                                    # Find the most specific (smallest text) match
+                                    best = None
+                                    best_len = 999999
+                                    for i in range(cand_count):
+                                        cand = candidates.nth(i)
+                                        try:
+                                            txt = (await cand.inner_text()).strip()
+                                            if len(txt) < best_len and ("collection" in txt.lower() or "organize" in txt.lower()):
+                                                best_len = len(txt)
+                                                best = cand
+                                        except Exception:
+                                            pass
+                                    if best:
+                                        coll_btn = best
+                                        logger.info(f"Found 'Collection' option card via '{coll_sel}' (text length: {best_len})")
+                                        break
+                            except Exception:
+                                pass
+                        
+                        if coll_btn:
+                            break
+                        logger.warning(f"Collection option not found on attempt {add_attempt+1}. Retrying...")
+                        # Dismiss any open modals before retrying
+                        await page.keyboard.press("Escape")
+                        await page.wait_for_timeout(2000)
+                    
                     if not coll_btn:
-                        raise Exception("Could not locate 'Collection' option button in the Add menu!")
-
-                    await coll_btn.wait_for(state="visible", timeout=10000)
+                        raise Exception("Could not locate 'Collection' option in the 'Add to your Shop' modal!")
+                    
+                    # Click the Collection option card
+                    logger.info("Clicking 'Collection' option card...")
                     await coll_btn.click(force=True)
                     await page.wait_for_timeout(8000)
                 else:
@@ -560,27 +509,34 @@ class LinktreeClient:
                     logger.info("Locating the '+ Add' button inside the collection modal...")
                     modal_add_btn = None
                     for selector in [
+                        'dialog:visible button:has-text("Add")',
                         'dialog:visible button:has-text("+ Add")',
                         'dialog:visible button:has-text("Add products")',
-                        'dialog:visible button:has-text("Add")',
+                        'button:has-text("Add products")',
+                        'button:has-text("+ Add product")',
                         'button:has-text("+ Add")',
-                        'button:has-text("Add")'
+                        '[aria-label*="add" i]',
+                        '[data-testid*="add" i]'
                     ]:
-                        loc = page.locator(selector).filter(visible=True).first
-                        if await loc.count() > 0:
-                            modal_add_btn = loc
-                            break
+                        try:
+                            loc = page.locator(selector).filter(visible=True).first
+                            if await loc.count() > 0:
+                                modal_add_btn = loc
+                                logger.info(f"Found collection modal Add button via selector: {selector}")
+                                break
+                        except Exception:
+                            pass
                     
                     if modal_add_btn:
                         await modal_add_btn.click(force=True)
-                        await page.wait_for_timeout(8000)
+                        await page.wait_for_timeout(5000)
                     else:
-                        raise Exception("Could not find '+ Add' button inside the opened collection modal!")
+                        logger.warning("Explicit '+ Add' button not found inside collection modal; checking if search input is already visible...")
 
                 title_already_filled = False
                 if not coll_exists:
                     # Check for Linktree's 'Title First' UI variant (asks for title + Continue button before products)
-                    await page.wait_for_timeout(4000)
+                    await page.wait_for_timeout(3000)
                     try:
                         continue_btn = page.locator('dialog:visible button:has-text("Continue")').filter(visible=True).first
                         if await continue_btn.count() > 0:
@@ -590,7 +546,7 @@ class LinktreeClient:
                                 await title_first_input.fill(collection_name_clean)
                                 await page.wait_for_timeout(2000)
                                 await continue_btn.click(force=True)
-                                await page.wait_for_timeout(8000)
+                                await page.wait_for_timeout(6000)
                                 title_already_filled = True
                     except Exception as e:
                         logger.debug(f"Title First check skipped: {e}")
@@ -600,16 +556,32 @@ class LinktreeClient:
                 logger.info("Pasting product affiliate link in URL search input...")
                 
                 # First wait for the dialog/modal to fully render
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(3000)
                 
-                # Use get_by_placeholder to find the visible search input safely
+                # Use robust multi-selector loop to find ANY visible input element
                 search_input = None
-                for _ in range(45):
-                    loc = page.locator('input[placeholder*="Search products"], input[placeholder*="Paste URL"], input[type="url"]').filter(visible=True).first
-                    if await loc.count() > 0:
-                        search_input = loc
+                for _ in range(35):
+                    for in_sel in [
+                        'input[placeholder*="Search" i]',
+                        'input[placeholder*="Paste" i]',
+                        'input[placeholder*="URL" i]',
+                        'input[type="url"]',
+                        'dialog:visible input',
+                        '[role="dialog"]:visible input',
+                        'main input[type="text"]:visible',
+                        'input[type="text"]:visible'
+                    ]:
+                        try:
+                            loc = page.locator(in_sel).filter(visible=True).first
+                            if await loc.count() > 0:
+                                search_input = loc
+                                logger.info(f"Found visible search input via selector: '{in_sel}'")
+                                break
+                        except Exception:
+                            pass
+                    if search_input:
                         break
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(1000)
                 
                 if not search_input:
                     raise Exception("Timeout waiting for Search Input to become visible.")

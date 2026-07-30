@@ -202,7 +202,10 @@ class ImageTools:
 
     @staticmethod
     def download_image(url: str, save_dir: str | Path = "images") -> str:
-        """Download an image from a URL to the local filesystem."""
+        if not url or not url.strip():
+            logger.error("Cannot download image: URL is empty or invalid.")
+            raise ValueError("Cannot download image: URL is empty or invalid.")
+
         if not HAS_PILLOW:
             logger.warning("requests module not installed. Cannot download image.")
             raise ImportError("requests is required for downloading images.")
@@ -628,10 +631,10 @@ class ImageTools:
             BG_COLOR = (248, 245, 240)
             canvas = Image.new("RGBA", (canvas_w, canvas_h), (*BG_COLOR, 255))
 
-            card_w = 840
-            card_h = 920
+            card_w = 860
+            card_h = 980
             card_x = (canvas_w - card_w) // 2
-            card_y = 175  # Shifted down to lower content and eliminate bottom blank space
+            card_y = 150  # Upper-centered for high impact
             card_radius = 28  # Strict 28px radius
             border_width = 1
 
@@ -667,7 +670,7 @@ class ImageTools:
             )
             canvas = Image.alpha_composite(canvas, card_layer)
 
-            # ── 4. RESIZE & POSITION HERO PRODUCT (EXACT 78–80% CARD OCCUPANCY) ──
+            # ── 4. RESIZE & POSITION HERO PRODUCT (EXACT 88–92% CARD OCCUPANCY) ──
             cropped_prod = ImageTools.normalize_and_crop_product_image(img)
             
             if cropped_prod.mode in ("RGBA", "P"):
@@ -677,19 +680,19 @@ class ImageTools:
                 prod_rgb = cropped_prod.convert("RGB")
 
             prod_aspect = prod_rgb.width / prod_rgb.height
-            card_padding = 40
+            card_padding = 18
             inner_card_w = card_w - card_padding * 2
             inner_card_h = card_h - card_padding * 2
 
             if prod_aspect < 0.85:
-                target_w = inner_card_w * 0.80 * product_scale_factor
-                target_h = inner_card_h * 0.82 * product_scale_factor
+                target_w = inner_card_w * 0.94 * product_scale_factor
+                target_h = inner_card_h * 0.95 * product_scale_factor
             elif prod_aspect > 1.15:
-                target_w = inner_card_w * 0.82 * product_scale_factor
-                target_h = inner_card_h * 0.78 * product_scale_factor
+                target_w = inner_card_w * 0.95 * product_scale_factor
+                target_h = inner_card_h * 0.92 * product_scale_factor
             else:
-                target_w = inner_card_w * 0.80 * product_scale_factor
-                target_h = inner_card_h * 0.80 * product_scale_factor
+                target_w = inner_card_w * 0.94 * product_scale_factor
+                target_h = inner_card_h * 0.94 * product_scale_factor
 
             scale_w = target_w / prod_rgb.width
             scale_h = target_h / prod_rgb.height

@@ -152,6 +152,8 @@ def get_next_category_based_on_analytics(db, categories: list[str]) -> str:
         "TirTir cushion foundation",
         "Clean girl aesthetic makeup",
         "Back-To-School 5-Minute Skincare & Beauty",
+        "Sephora A+ Beauty Essentials Back-To-School",
+        "New and Trending Under $50 Beauty Finds",
         "Summer Fridays lip butter balm dupes",
         "Biodance Bio-Collagen deep mask",
         "Sol de Janeiro dupes",
@@ -553,9 +555,8 @@ async def main() -> None:
                         logger.warning("3 failures in a row. Sleeping 15 min...")
                         await asyncio.sleep(900)  # 15 minutes
                     else:
-                        logger.warning("Pipeline step failed. Retrying immediately in 5 seconds to resume pending task...")
-                        await asyncio.sleep(5)  # 5 seconds fast retry
-                    continue
+                        logger.warning("Pipeline step encountered error. Safe Schedule: Waiting 15-25 minutes before next cycle...")
+                        # Fallthrough to regular 15-25 min delay below
     
                 # ── Handle success / duplicate after try block ─────────────────
                 if success == "DUPLICATE":
@@ -570,14 +571,12 @@ async def main() -> None:
                         except Exception as m_err:
                             logger.warning("Failed to mark Trend Miner ID #%s as pinned: %s", trending_miner_id, m_err)
                 else:
-                    logger.error("Pipeline returned False. Retrying immediately in 5 seconds to finish pending sync...")
-                    await asyncio.sleep(5)
-                    continue
+                    logger.warning("Pipeline returned False or quality check skipped item. Scheduling next cycle with safe delay...")
                     
-                # 3. Safe Zone Human Pacing: Random 10 to 20 minutes delay between pins (Non-stop for 90 Days)
+                # 3. Safe Zone Human Pacing: Random 15 to 25 minutes delay between pins (Non-stop for 90 Days)
                 import random
-                interval_mins = random.randint(10, 20)
-                logger.info("✅ Day %d/%d Pin completed! Today's Progress: %d pins today. Safe Zone: Next pin scheduled in %d minutes (10-20 min random delay)...", campaign_day, TOTAL_CAMPAIGN_DAYS, today_count + 1, interval_mins)
+                interval_mins = random.randint(15, 25)
+                logger.info("⏳ Safe Zone Schedule: Next pin scheduled in %d minutes (Randomized 15-25 min delay)...", interval_mins)
                 await asyncio.sleep(interval_mins * 60)
                 
             # Exit outer loop cleanly if inner loop breaks without Exception

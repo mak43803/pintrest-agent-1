@@ -236,11 +236,29 @@ class AmazonClient:
         
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
             
             # 1. Extract Title
-            title_loc = page.locator("#productTitle").first
-            title = await title_loc.inner_text() if await title_loc.count() > 0 else "Unknown Product"
-            title = title.strip()
+            title = ""
+            title_loc = page.locator("#productTitle, #title, #titleSection h1, h1.a-size-large, span#productTitle").first
+            if await title_loc.count() > 0:
+                title = (await title_loc.inner_text()).strip()
+            
+            if not title or title == "Unknown Product":
+                meta_title = page.locator("meta[property='og:title'], meta[name='title']").first
+                if await meta_title.count() > 0:
+                    title = (await meta_title.get_attribute("content") or "").strip()
+            
+            if not title or title == "Unknown Product":
+                try:
+                    page_t = (await page.title()).strip()
+                    if page_t and "Amazon.com" not in page_t and "Robot Check" not in page_t:
+                        title = page_t.split(":")[0].split("|")[0].strip()
+                except Exception:
+                    pass
+            
+            if not title or any(check in title.lower() for check in ["robot check", "captcha", "something went wrong"]):
+                title = "Unknown Product"
             
             # Anti-Book Check on extracted Amazon product title
             book_terms = ["paperback", "hardcover", "kindle edition", "spiral-bound", "audiobook", "handbook", "manual", "usmle", "study guide", "textbook", "guidebook", "navigation handbook"]
@@ -259,12 +277,25 @@ class AmazonClient:
             # 3. Extract High-Res Image
             image_url = ""
             try:
-                img_loc = page.locator("#landingImage, #imgBlkFront, #main-image").first
+                img_loc = page.locator("#landingImage, #imgBlkFront, #main-image, #imgTagWrapperId img, #landingImageContainer img, img[data-a-dynamic-image]").first
                 if await img_loc.count() > 0:
                     image_url = await img_loc.get_attribute("src", timeout=2000) or ""
                     hires = await img_loc.get_attribute("data-old-hires", timeout=1000)
                     if hires:
                         image_url = hires
+                    dyn_img = await img_loc.get_attribute("data-a-dynamic-image", timeout=1000)
+                    if dyn_img:
+                        import json
+                        try:
+                            img_dict = json.loads(dyn_img)
+                            if img_dict:
+                                image_url = list(img_dict.keys())[0]
+                        except Exception:
+                            pass
+                if not image_url:
+                    meta_img = page.locator("meta[property='og:image']").first
+                    if await meta_img.count() > 0:
+                        image_url = await meta_img.get_attribute("content") or ""
             except Exception as e:
                 logger.warning(f"Could not extract Amazon image: {e}")
                 
@@ -321,6 +352,10 @@ class AmazonClient:
                                     price = f"${num}"
             except Exception as e:
                 logger.debug(f"Could not extract price: {e}")
+
+            if title == "Unknown Product" or not image_url:
+                logger.error("Failed to extract valid product title/image from Amazon page: title='%s', image_url='%s'", title, image_url)
+                raise ValueError(f"Failed to extract valid product details (title='{title}', image_url='{image_url}') from Amazon URL: {url}")
 
             logger.info("Successfully extracted Amazon product  │  title=%s  price=%s  rating=%.1f★  reviews=%d", title[:30], price or "N/A", rating, review_count)
             

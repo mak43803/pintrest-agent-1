@@ -2,13 +2,13 @@
  👑 BADDIES BEAUTY — PINTEREST & AFFILIATE LINK WATCHDOG REPORT
 ═════════════════════════════════════════════════════════════════
  🏷️  Target Affiliate Tag : savvyshop0965-20
- 📦 Total Products in DB : 783
- ✅ Valid Tagged Links   : 782 / 783
+ 📦 Total Products in DB : 2241
+ ✅ Valid Tagged Links   : 2240 / 2241
  🔧 Auto-Repaired Links  : 0
  ⚠️  Missing Links        : 1
 ─────────────────────────────────────────────────────────────────
- 🌐 Fully Published (Pinterest + Linktree) : 783
- ⏳ Pending Linktree Sync                 : 0
- 📌 Pins with Saved Pin URL (ID #384-637) : 400
- 📜 Legacy Pins (Older entries #1-383)   : 383
+ 🌐 Fully Published (Pinterest + Linktree) : 860
+ ⏳ Pending Linktree Sync                 : 4
+ 📌 Pins with Saved Pin URL (ID #384-637) : 478
+ 📜 Legacy Pins (Older entries #1-383)   : 386
 ═════════════════════════════════════════════════════════════════
