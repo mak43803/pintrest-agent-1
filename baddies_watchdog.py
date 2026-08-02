@@ -108,8 +108,10 @@ def run_watchdog_audit(auto_repair: bool = False, verbose: bool = False) -> dict
         elif status.lower() in ["published", "pinterest_published"]:
             legacy_pins_without_url += 1
 
-    if auto_repair and repaired_links > 0:
-        conn.commit()
+    if auto_repair:
+        cursor.execute("UPDATE products SET status = 'Pending_Pin' WHERE status = 'Processing'")
+        if repaired_links > 0 or cursor.rowcount > 0:
+            conn.commit()
 
     conn.close()
 

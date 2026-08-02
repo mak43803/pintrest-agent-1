@@ -539,8 +539,19 @@ class PinterestAgent:
             logger.info("📦 PRE-SEEDED QUEUE DETECTED! Processing Product ID #%d: '%s' (Board: '%s')...", db_product_id, p_name[:40], p_board)
             
             # Resolve link to clean direct ASIN URL
-            clean_link = await self.amazon.ensure_direct_product_url(p_aff)
-            
+            clean_link = await self.amazon.ensure_direct_product_url(p_aff or p_name)
+            if not clean_link or not clean_link.startswith("http") or "/dp/" not in clean_link:
+                logger.info("Retrying link resolution for Product ID #%d using product_name: '%s'...", db_product_id, p_name)
+                clean_link = await self.amazon.ensure_direct_product_url(p_name)
+
+            if not clean_link or not clean_link.startswith("http"):
+                logger.warning("⚠️ COULD NOT RESOLVE AFFILIATE LINK for Product ID #%d ('%s'). Marking as Failed_Quality and falling back to live sourcing...", db_product_id, p_name)
+                with self.db.connection() as conn:
+                    conn.execute("UPDATE products SET status = 'Failed_Quality' WHERE id = ?", (db_product_id,))
+                db_pending_row = None
+                db_product_id = None
+
+        if db_pending_row and clean_link and clean_link.startswith("http"):
             # Synchronize Title, Image, and Price directly from the live Amazon ASIN page
             product_details = None
             try:
@@ -573,7 +584,7 @@ class PinterestAgent:
                         "UPDATE products SET product_name = ?, affiliate_link = ?, price = ? WHERE id = ?",
                         (product_details.title, clean_link, product_details.price, db_product_id)
                     )
-        else:
+        if not db_pending_row:
             # Fetch ALL previously posted products to avoid duplicates completely
             past_products = []
             with self.db.connection() as conn:
@@ -833,6 +844,9 @@ class PinterestAgent:
         # Pre-publish Quality Check
         if not self.verify_quality(product_details, seo_data, pin_image_path, target_board, db_product_id=db_product_id):
             logger.error("Quality Check failed! Aborting publish.")
+            if db_product_id:
+                with self.db.connection() as conn:
+                    conn.execute("UPDATE products SET status = 'Failed_Quality' WHERE id = ?", (db_product_id,))
             return False
 
         # Step 5: Pinterest Upload
