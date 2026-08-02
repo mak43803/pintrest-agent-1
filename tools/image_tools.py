@@ -207,11 +207,11 @@ class ImageTools:
         if not url or not isinstance(url, str):
             return ""
         url = url.strip()
-        if "media-amazon.com" in url or "ssl-images-amazon.com" in url or "images-na.ssl-images-amazon.com" in url:
-            url = re.sub(r'\._[A-Z0-9_,-]+_\.', '._AC_SL1500_.', url)
-        elif "sephora.com" in url or "sephora.ca" in url or "sephoramedia.com" in url:
+        if "amazon" in url.lower() or "/images/i/" in url.lower():
+            url = re.sub(r'\._[A-Za-z0-9_,-]+_\.', '._AC_SL1500_.', url)
+        elif "sephora" in url.lower():
             url = re.sub(r'imwidth=\d+', 'imwidth=1500', url)
-        elif "ulta.com" in url:
+        elif "ulta" in url.lower():
             url = re.sub(r'w=\d+', 'w=1500', url)
             url = re.sub(r'h=\d+', 'h=1500', url)
         return url
@@ -519,44 +519,58 @@ class ImageTools:
     def normalize_and_crop_product_image(img: Image.Image, tolerance: int = 245) -> Image.Image:
         """
         PRODUCT SIZE NORMALIZATION (MANDATORY Rules 1-15):
-        1. Detect actual product object.
-        2. Remove unnecessary white, transparent, and empty margins.
-        3. Crop tightly around product with 2% safety padding.
+        1. Detect actual product object by sampling background color from corners.
+        2. Remove white, off-white, light gray, transparent, and empty margins.
+        3. Crop tightly around product object with 2% safety padding.
         """
         try:
             import numpy as np
-            if img.mode != "RGBA":
-                img_rgba = img.convert("RGBA")
-            else:
-                img_rgba = img.copy()
+            img_rgba = img.convert("RGBA")
+            arr = np.array(img_rgba)
+            r, g, b, a = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2], arr[:, :, 3]
 
-            np_img = np.array(img_rgba)
-            r, g, b, a = np_img[:, :, 0], np_img[:, :, 1], np_img[:, :, 2], np_img[:, :, 3]
-            
-            # Non-background mask: Alpha > 15 and RGB not pure white/near-white
-            is_non_transparent = a > 15
-            is_non_white = (r < tolerance) | (g < tolerance) | (b < tolerance)
-            product_mask = is_non_transparent & is_non_white
-            
-            coords = np.argwhere(product_mask)
-            if coords.size == 0:
-                return img
-                
-            y_min, x_min = coords.min(axis=0)
-            y_max, x_max = coords.max(axis=0)
-            
-            # Add 2% safety padding around bounding box
-            w = x_max - x_min
-            h = y_max - y_min
-            pad_x = max(4, int(w * 0.02))
-            pad_y = max(4, int(h * 0.02))
-            
-            x_min = max(0, x_min - pad_x)
-            y_min = max(0, y_min - pad_y)
-            x_max = min(img.width, x_max + pad_x)
-            y_max = min(img.height, y_max + pad_y)
-            
-            return img.crop((x_min, y_min, x_max, y_max))
+            h, w = arr.shape[:2]
+            c_size = min(15, max(3, h // 15), max(3, w // 15))
+            c_top_left = arr[:c_size, :c_size, :3].reshape(-1, 3)
+            c_top_right = arr[:c_size, -c_size:, :3].reshape(-1, 3)
+            c_bot_left = arr[-c_size:, :c_size, :3].reshape(-1, 3)
+            c_bot_right = arr[-c_size:, -c_size:, :3].reshape(-1, 3)
+
+            corners = np.vstack([c_top_left, c_top_right, c_bot_left, c_bot_right])
+            bg_r = np.median(corners[:, 0])
+            bg_g = np.median(corners[:, 1])
+            bg_b = np.median(corners[:, 2])
+
+            # Distance from median background color
+            dist = np.sqrt((r.astype(float) - bg_r)**2 + (g.astype(float) - bg_g)**2 + (b.astype(float) - bg_b)**2)
+
+            # Foreground mask: pixel color significantly different from background AND alpha > 20
+            fg_mask = (dist > 16) & (a > 20)
+
+            # Filter out rows/cols with negligible foreground density (noise threshold: at least 0.3% of length or 3px)
+            min_row_px = max(3, int(w * 0.003))
+            min_col_px = max(3, int(h * 0.003))
+
+            valid_rows = np.where(fg_mask.sum(axis=1) >= min_row_px)[0]
+            valid_cols = np.where(fg_mask.sum(axis=0) >= min_col_px)[0]
+
+            if len(valid_rows) > 0 and len(valid_cols) > 0:
+                y_min, y_max = valid_rows[0], valid_rows[-1]
+                x_min, x_max = valid_cols[0], valid_cols[-1]
+
+                crop_w = x_max - x_min
+                crop_h = y_max - y_min
+                pad_x = max(6, int(crop_w * 0.02))
+                pad_y = max(6, int(crop_h * 0.02))
+
+                x_min = max(0, x_min - pad_x)
+                y_min = max(0, y_min - pad_y)
+                x_max = min(w, x_max + pad_x)
+                y_max = min(h, y_max + pad_y)
+
+                return img.crop((x_min, y_min, x_max, y_max))
+
+            return img
         except Exception as exc:
             logger.debug(f"Auto-crop normalization fallback: {exc}")
             return img
@@ -646,49 +660,38 @@ class ImageTools:
             canvas = Image.composite(glow_layer, canvas, glow_mask)
 
             # ── 2. LAYOUT SPECIFIC PARAMETERS ──
-            # Determine Card & Product placement based on current_layout
-            # Target product dominance: 75% to 85% of card visual area
+            # Target product dominance: 85% to 95% of card visual area
             card_radius = 28
-            border_width = 2
+            border_width = 1
             
             if current_layout == "Layout A":  # Centered Hero
-                card_w, card_h = 860, 980
-                card_x = (canvas_w - card_w) // 2
-                card_y = 170
-                product_scale_factor = 0.96
-            elif current_layout == "Layout B":  # Product Left
-                card_w, card_h = 840, 960
-                card_x = (canvas_w - card_w) // 2 - 30
-                card_y = 170
-                product_scale_factor = 0.94
-            elif current_layout == "Layout C":  # Product Right
-                card_w, card_h = 840, 960
-                card_x = (canvas_w - card_w) // 2 + 30
-                card_y = 170
-                product_scale_factor = 0.94
-            elif current_layout == "Layout D":  # Close-up Hero (95%+ Dominance)
-                card_w, card_h = 880, 1020
+                card_w, card_h = 860, 920
                 card_x = (canvas_w - card_w) // 2
                 card_y = 150
-                product_scale_factor = 0.98
-            else:  # Layout E: Dual Product / Composite Card
-                card_w, card_h = 850, 970
+                product_scale_factor = 1.02
+            elif current_layout == "Layout B":  # Product Left
+                card_w, card_h = 840, 920
+                card_x = (canvas_w - card_w) // 2 - 20
+                card_y = 150
+                product_scale_factor = 1.0
+            elif current_layout == "Layout C":  # Product Right
+                card_w, card_h = 840, 920
+                card_x = (canvas_w - card_w) // 2 + 20
+                card_y = 150
+                product_scale_factor = 1.0
+            elif current_layout == "Layout D":  # Close-up Hero (95%+ Dominance)
+                card_w, card_h = 880, 940
                 card_x = (canvas_w - card_w) // 2
-                card_y = 180
-                product_scale_factor = 0.95
-            # ── 3. CANVAS & CARD SETUP (SEPHORA + RHODE + MERIT + VIOLET GREY TEMPLATE) ──
-            # Warm ivory background (#F8F5F0)
-            BG_COLOR = (248, 245, 240)
-            canvas = Image.new("RGBA", (canvas_w, canvas_h), (*BG_COLOR, 255))
+                card_y = 140
+                product_scale_factor = 1.04
+            else:  # Layout E: Dual Product / Composite Card
+                card_w, card_h = 860, 920
+                card_x = (canvas_w - card_w) // 2
+                card_y = 150
+                product_scale_factor = 1.02
 
-            card_w = 860
-            card_h = 980
-            card_x = (canvas_w - card_w) // 2
-            card_y = 150  # Upper-centered for high impact
-            card_radius = 28  # Strict 28px radius
-            border_width = 1
-
-            # Soft, natural, almost invisible shadow
+            # ── 3. CANVAS & CARD SETUP ──
+            # Soft, natural shadow
             shadow_offset_y = 10
             shadow_expand = 6
             card_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
@@ -704,7 +707,7 @@ class ImageTools:
                     card_y + card_h + shadow_offset_y + shadow_expand,
                 ],
                 radius=card_radius + shadow_expand,
-                fill=24,  # Very soft natural shadow
+                fill=24,  # Soft natural shadow
             )
             shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(radius=18))
             shadow_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 255))
@@ -720,7 +723,7 @@ class ImageTools:
             )
             canvas = Image.alpha_composite(canvas, card_layer)
 
-            # ── 4. RESIZE & POSITION HERO PRODUCT (EXACT 88–92% CARD OCCUPANCY) ──
+            # ── 4. RESIZE & POSITION HERO PRODUCT (HIGH IMPACT DOMINANCE) ──
             cropped_prod = ImageTools.normalize_and_crop_product_image(img)
             
             if cropped_prod.mode in ("RGBA", "P"):
@@ -730,19 +733,19 @@ class ImageTools:
                 prod_rgb = cropped_prod.convert("RGB")
 
             prod_aspect = prod_rgb.width / prod_rgb.height
-            card_padding = 18
+            card_padding = 14
             inner_card_w = card_w - card_padding * 2
             inner_card_h = card_h - card_padding * 2
 
             if prod_aspect < 0.85:
-                target_w = inner_card_w * 0.94 * product_scale_factor
-                target_h = inner_card_h * 0.95 * product_scale_factor
+                target_w = inner_card_w * 0.98 * product_scale_factor
+                target_h = inner_card_h * 0.98 * product_scale_factor
             elif prod_aspect > 1.15:
-                target_w = inner_card_w * 0.95 * product_scale_factor
-                target_h = inner_card_h * 0.92 * product_scale_factor
+                target_w = inner_card_w * 0.98 * product_scale_factor
+                target_h = inner_card_h * 0.96 * product_scale_factor
             else:
-                target_w = inner_card_w * 0.94 * product_scale_factor
-                target_h = inner_card_h * 0.94 * product_scale_factor
+                target_w = inner_card_w * 0.98 * product_scale_factor
+                target_h = inner_card_h * 0.98 * product_scale_factor
 
             scale_w = target_w / prod_rgb.width
             scale_h = target_h / prod_rgb.height
