@@ -28,11 +28,11 @@ Usage::
     await manager.initialize()
 
     # Full response
-    response = await manager.chat("Search for earbuds on Pinterest")
+    response = await manager.chat("Search for Korean glass skin sunscreen on Pinterest")
     print(response)
 
     # Streaming
-    async for token in manager.stream_chat("Find trending home decor"):
+    async for token in manager.stream_chat("Find trending viral lip oils"):
         print(token, end="", flush=True)
 
     await manager.shutdown()

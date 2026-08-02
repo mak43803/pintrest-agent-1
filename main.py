@@ -382,22 +382,15 @@ async def main() -> None:
                     "Shaving creams & oils", "Sol de Janeiro dupes", "Strawberry legs treatments",
                     "Summer body glow oils", "Viral body mists", "Whole body deodorants", "Women's Fragrances",
 
-                    # ── A-Z Nails, Teeth, & Aesthetics ──
-                    "Aesthetic bridesmaid gift bags", "Aesthetic college outfits", "Aesthetic gold jewelry",
-                    "Aesthetic gym outfits", "Aesthetic oversized hoodies", "Aesthetic platform sneakers",
-                    "Aesthetic tote bags", "Bachelorette party outfits", "Biab nails & builder gel",
-                    "Bridal shower aesthetic", "Capsule wardrobe essentials", "Chic workwear outfits",
-                    "Chrome nails & powders", "Chunky gold hoop earrings", "Cozy fall sweaters",
-                    "Crossbody bags for women", "Cute lounge sets", "Cute summer dresses",
-                    "Dainty gold necklaces", "Designer purse dupes on Amazon", "Everyday casual outfits",
-                    "French tip nail designs", "Gel nail polish kits", "Glazed donut nails",
-                    "High waisted wide leg pants", "Lululemon align dupes", "Mini skirts & skorts",
-                    "Nail art tools & brushes", "Nail care & cuticle oils", "Nail polish removers",
-                    "Old money aesthetic outfits", "Pilates princess aesthetic", "Press-on nails & glue",
-                    "Quick-dry nail top coats", "Russian manicure tools", "Skims dupes on Amazon",
-                    "Stanley cup accessories", "Stiletto & almond nails", "Tarnish-free rings",
-                    "Teeth whitening kits", "Teeth whitening strips & pens", "Tennis bracelets",
-                    "Vacation beauty essentials", "Vintage shoulder bags", "Whitening toothpastes",
+                    # ── A-Z Nails, Teeth, Lip & Beauty Aesthetics ──
+                    "Biab nails & builder gel", "Chrome nails & powders", "French tip nail designs",
+                    "Gel nail polish kits", "Glazed donut nails", "Nail art tools & brushes",
+                    "Nail care & cuticle oils", "Nail polish removers", "Press-on nails & glue",
+                    "Quick-dry nail top coats", "Russian manicure tools", "Stiletto & almond nails",
+                    "Teeth whitening kits", "Teeth whitening strips & pens", "Whitening toothpastes",
+                    "Lip sleep masks", "Lip scrubs & exfoliators", "Plumping lip glosses",
+                    "Under eye patches & masks", "Eyelash growth serums", "Lash lift kits at home",
+                    "Face ice rollers & gua sha", "Facial steaming tools", "Vacation beauty essentials",
 
                     # ── Hyper-Specific High-Converting Beauty Sub-Niches ──
                     "Charlotte Tilbury dupes on Amazon", "Dyson Airwrap alternative under $50", 

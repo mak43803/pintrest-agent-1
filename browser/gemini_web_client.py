@@ -293,13 +293,13 @@ CRITICAL RULES:
             "Viral Perfumes & Body Mists",
             "KP & Strawberry Legs Treatments",
             "Self Care Bath & Body Spa Essentials",
-            # Aesthetic Fashion & Home Decor Boards
-            "Clean Girl Capsule Wardrobe USA 2026",
-            "Aesthetic Linen Outfits & Summer Styling",
-            "Gold Layered Jewelry & Everyday Accessories",
-            "Aesthetic Travertine & Marble Home Decor",
-            "Cozy Bedroom & Warm Ambient Lighting",
-            "Minimalist Coffee Table & Bookshelf Styling",
+            # Aesthetic K-Beauty & High-Converting Beauty Boards
+            "Korean Sunscreens That Leave Zero White Cast",
+            "K-Beauty Serums That Actually Work",
+            "Glass Skin Cleansers & Hydration Essentials",
+            "Sephora Minis & Gift Sets 2026",
+            "Dior Lip Oil $8 Amazon Dupes",
+            "Back-To-School 5-Minute Skincare & Beauty",
             # Viral & Amazon Bargain Boards (Highest Outbound CTR)
             "Amazon Beauty Finds Under $20",
             "Amazon Beauty Finds",

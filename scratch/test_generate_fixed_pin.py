@@ -1,23 +1,23 @@
-from PIL import Image, ImageFilter, ImageDraw, ImageEnhance
+from PIL import Image, ImageFilter, ImageDraw, ImageFont, ImageEnhance
 import numpy as np
-import os
+from pathlib import Path
+from tools.image_tools import ImageTools
 
-def normalize_and_crop_product_image_v2(img: Image.Image) -> Image.Image:
+def normalize_and_crop_product_image_v3(img: Image.Image) -> Image.Image:
     """
-    Robust auto-cropping:
-    1. Sample corner background color.
-    2. Threshold pixels based on color distance from background.
-    3. Use row/column density thresholds to ignore isolated noise.
-    4. Crop tightly with 2% safety margin.
+    Robust, precision auto-cropping:
+    1. Detect background color by sampling 4 corner regions.
+    2. Compute Euclidean color distance from median background color.
+    3. Filter out rows/columns with negligible foreground density (noise rejection).
+    4. Return tightly cropped product with 2% safety padding.
     """
     try:
         img_rgba = img.convert("RGBA")
         arr = np.array(img_rgba)
         r, g, b, a = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2], arr[:, :, 3]
 
-        # Sample corner background color (10x10 blocks in 4 corners)
         h, w = arr.shape[:2]
-        c_size = min(15, h // 10, w // 10)
+        c_size = min(15, max(3, h // 15), max(3, w // 15))
         c_top_left = arr[:c_size, :c_size, :3].reshape(-1, 3)
         c_top_right = arr[:c_size, -c_size:, :3].reshape(-1, 3)
         c_bot_left = arr[-c_size:, :c_size, :3].reshape(-1, 3)
@@ -28,19 +28,15 @@ def normalize_and_crop_product_image_v2(img: Image.Image) -> Image.Image:
         bg_g = np.median(corners[:, 1])
         bg_b = np.median(corners[:, 2])
 
-        # Distance from median background color
+        # Distance from background color
         dist = np.sqrt((r.astype(float) - bg_r)**2 + (g.astype(float) - bg_g)**2 + (b.astype(float) - bg_b)**2)
 
-        # Foreground mask: pixel color significantly different from background AND alpha > 20
-        fg_mask = (dist > 18) & (a > 20)
+        # Foreground mask: pixel color distance > 16 from background AND alpha > 20
+        fg_mask = (dist > 16) & (a > 20)
 
-        # Calculate row and column densities
-        row_density = fg_mask.mean(axis=1)
-        col_density = fg_mask.mean(axis=0)
-
-        # Filter out rows/cols with negligible foreground density (noise threshold: at least 0.003 or 2 px)
-        min_row_px = max(2, int(w * 0.003))
-        min_col_px = max(2, int(h * 0.003))
+        # Row & Column pixel density threshold (require at least 0.3% of row/col length or 3px)
+        min_row_px = max(3, int(w * 0.003))
+        min_col_px = max(3, int(h * 0.003))
 
         valid_rows = np.where(fg_mask.sum(axis=1) >= min_row_px)[0]
         valid_cols = np.where(fg_mask.sum(axis=0) >= min_col_px)[0]
@@ -49,7 +45,6 @@ def normalize_and_crop_product_image_v2(img: Image.Image) -> Image.Image:
             y_min, y_max = valid_rows[0], valid_rows[-1]
             x_min, x_max = valid_cols[0], valid_cols[-1]
 
-            # Add 2% safety padding
             crop_w = x_max - x_min
             crop_h = y_max - y_min
             pad_x = max(6, int(crop_w * 0.02))
@@ -67,10 +62,8 @@ def normalize_and_crop_product_image_v2(img: Image.Image) -> Image.Image:
         print("Crop error:", e)
         return img
 
-# Test on 3 images
-for filename in ['f8147e04.jpg', '00ecb4ed.jpg', '1e3e1511.jpg']:
-    path = os.path.join('images', filename)
-    if os.path.exists(path):
-        im = Image.open(path)
-        cr = normalize_and_crop_product_image_v2(im)
-        print(f"File {filename}: Original {im.size} -> Cropped {cr.size}")
+# Test generating pin for 1565 using raw download image or latest generated pin base
+im_raw = Image.open('images/f8147e04.jpg')
+print("Raw image size:", im_raw.size)
+cropped = normalize_and_crop_product_image_v3(im_raw)
+print("Cropped size:", cropped.size)
