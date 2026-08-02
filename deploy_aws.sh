@@ -10,12 +10,11 @@ echo " STEP 1: System Update & Base Dependencies"
 echo "======================================================"
 sudo apt update -y
 sudo apt install -y \
-    python3.12 python3.12-venv python3.12-dev python3-pip \
+    python3 python3-venv python3-dev python3-pip \
     git curl wget unzip \
     xvfb x11vnc \
     fonts-liberation fonts-noto-color-emoji \
-    libxss1 libappindicator1 libindicator7 \
-    libasound2 libnspr4 libnss3 libxcb-dri3-0 \
+    libxss1 libnspr4 libnss3 libxcb-dri3-0 \
     libgbm1 libxshmfence1 \
     ca-certificates gnupg lsb-release
 
@@ -58,7 +57,7 @@ echo ""
 echo "======================================================"
 echo " STEP 5: Python Virtual Environment & Dependencies"
 echo "======================================================"
-python3.12 -m venv venv
+python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
