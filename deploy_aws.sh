@@ -18,12 +18,16 @@ sudo apt install -y \
     libgbm1 libxshmfence1 \
     ca-certificates gnupg lsb-release
 
+# Install libasound (Ubuntu 24.04 Noble vs 22.04 Jammy compatibility)
+sudo apt install -y libasound2t64 || sudo apt install -y libasound2 || true
+
 echo ""
 echo "======================================================"
 echo " STEP 2: Install Google Chrome (Required for Agent)"
 echo "======================================================"
-wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | \
+sudo mkdir -p /usr/share/keyrings
+wget -q -O- https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor --yes -o /usr/share/keyrings/google-chrome.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | \
     sudo tee /etc/apt/sources.list.d/google-chrome.list
 sudo apt update -y
 sudo apt install -y google-chrome-stable
