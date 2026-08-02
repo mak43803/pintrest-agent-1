@@ -1196,6 +1196,7 @@ class PinterestAgent:
                 return extracted
 
         candidate = candidate.strip().replace('"', "").replace("'", "")
+        candidate = re.sub(r'^(?:Product Name|Product Title|Selected Product|Product|Title|Search Query|Keyword)\s*:\s*', '', candidate, flags=re.IGNORECASE).strip()
         
         # Split by lines and remove empty ones
         lines = [line.strip() for line in candidate.split('\n') if line.strip()]
@@ -1214,6 +1215,7 @@ class PinterestAgent:
             line = lines[i]
             line = line.replace("**", "")
             line = re.sub(r'^\s*[\-\*\•\d\.\)]+\s*', '', line).strip()
+            line = re.sub(r'^(?:Product Name|Product Title|Selected Product|Product|Title|Search Query|Keyword)\s*:\s*', '', line, flags=re.IGNORECASE).strip()
             lines[i] = line
 
         # 2. Try to locate standard plaintext search query blocks

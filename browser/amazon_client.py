@@ -175,12 +175,14 @@ class AmazonClient:
         Returns:
             The raw Amazon product URL, or None if no products found.
         """
-        logger.info("Searching Amazon for: '%s' (Quality Shield: Rating>=%.1f★, Reviews>=%d)...", keyword, min_rating, min_reviews)
+        import re, urllib.parse
+        clean_keyword = re.sub(r'^(?:Product Name|Product Title|Selected Product|Product|Title|Search Query|Keyword)\s*:\s*', '', keyword, flags=re.IGNORECASE).strip()
+        logger.info("Searching Amazon for: '%s' (Quality Shield: Rating>=%.1f★, Reviews>=%d)...", clean_keyword, min_rating, min_reviews)
         page = await self.manager.new_page()
         
         try:
             # Navigate to Amazon Beauty search specifically
-            search_url = f"https://www.amazon.com/s?k={keyword.replace(' ', '+')}&i=beauty"
+            search_url = f"https://www.amazon.com/s?k={urllib.parse.quote(clean_keyword)}&i=beauty"
             await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
             
             logger.info("Simulating proper human research on Amazon Beauty Search...")
