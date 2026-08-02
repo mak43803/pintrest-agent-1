@@ -23,12 +23,13 @@ import logging
 import os
 import uuid
 import math
+import re
 from pathlib import Path
 from typing import Tuple, List, Optional
 
 try:
     import requests
-    from PIL import Image, ImageFilter, ImageDraw, ImageFont
+    from PIL import Image, ImageFilter, ImageDraw, ImageFont, ImageEnhance
     HAS_PILLOW = True
 except ImportError:
     HAS_PILLOW = False
@@ -201,6 +202,21 @@ class ImageTools:
     """Operations for downloading and generating v4.0 luxury Pinterest pins."""
 
     @staticmethod
+    def sanitize_high_res_url(url: str) -> str:
+        """Automatically upgrade Amazon, Sephora, Ulta, and generic product URLs to 1500x1500 max resolution."""
+        if not url or not isinstance(url, str):
+            return ""
+        url = url.strip()
+        if "media-amazon.com" in url or "ssl-images-amazon.com" in url or "images-na.ssl-images-amazon.com" in url:
+            url = re.sub(r'\._[A-Z0-9_,-]+_\.', '._AC_SL1500_.', url)
+        elif "sephora.com" in url or "sephora.ca" in url or "sephoramedia.com" in url:
+            url = re.sub(r'imwidth=\d+', 'imwidth=1500', url)
+        elif "ulta.com" in url:
+            url = re.sub(r'w=\d+', 'w=1500', url)
+            url = re.sub(r'h=\d+', 'h=1500', url)
+        return url
+
+    @staticmethod
     def download_image(url: str, save_dir: str | Path = "images") -> str:
         if not url or not url.strip():
             logger.error("Cannot download image: URL is empty or invalid.")
@@ -210,19 +226,48 @@ class ImageTools:
             logger.warning("requests module not installed. Cannot download image.")
             raise ImportError("requests is required for downloading images.")
             
+        original_url = url.strip()
+        high_res_url = ImageTools.sanitize_high_res_url(original_url)
+
         path = Path(save_dir)
         path.mkdir(parents=True, exist_ok=True)
         
         filename = f"{uuid.uuid4().hex[:8]}.jpg"
         filepath = path / filename
         
-        logger.debug("Downloading image  │  url=%s", url[:50] + "...")
-        response = requests.get(url, stream=True, timeout=15)
-        response.raise_for_status()
-        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        }
+
+        try:
+            response = requests.get(high_res_url, headers=headers, stream=True, timeout=15)
+            response.raise_for_status()
+        except Exception as exc:
+            if high_res_url != original_url:
+                logger.warning("High-res image URL failed (%s), falling back to original: %s", exc, original_url)
+                response = requests.get(original_url, headers=headers, stream=True, timeout=15)
+                response.raise_for_status()
+                
         with open(filepath, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+
+        # Verify image validity and dimensions using Pillow
+        try:
+            from PIL import Image
+            with Image.open(filepath) as img:
+                w, h = img.size
+                if w < 150 or h < 150:
+                    logger.error(f"Downloaded image is too small ({w}x{h}). Rejecting generic icon/logo.")
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    raise ValueError(f"Downloaded image is too small ({w}x{h}).")
+        except Exception as e:
+            if os.path.exists(filepath):
+                try: os.remove(filepath)
+                except Exception: pass
+            raise ValueError(f"Invalid image downloaded: {e}")
                 
         logger.info("Image downloaded  │  path=%s", filepath)
         return str(filepath)
@@ -312,7 +357,6 @@ class ImageTools:
             return ""
             
         import unicodedata
-        import re
         
         # 1. Convert fullwidth / special currency symbols to standard ASCII $
         text = text.replace("＄", "$").replace("\u00a0", " ").replace("\u200b", "").replace("\u202f", " ")
@@ -395,7 +439,6 @@ class ImageTools:
         """Extract price number and return high-converting price tag badge."""
         if not price_str:
             return ""
-        import re
         clean_price = str(price_str).replace(",", "").strip()
         match = re.search(r'\$?(\d+(?:\.\d{1,2})?)', clean_price)
         if match:
@@ -568,10 +611,17 @@ class ImageTools:
             current_layout = layout if layout in LAYOUT_VARIATIONS else LAYOUT_VARIATIONS[pin_index % len(LAYOUT_VARIATIONS)]
             
             # Determine Top Label (Category-Smart Auto Rotation & Short 1-2 Word Enforcement)
-            if badge_text and badge_text.strip() and len(badge_text.strip()) <= 25:
+            has_price_val = bool(price_text and re.search(r'\$\d+', str(price_text)))
+            
+            if badge_text and badge_text.strip() and len(badge_text.strip()) <= 25 and "$" not in badge_text:
                 current_badge = badge_text.strip()
             else:
-                current_badge = ImageTools.get_smart_badge(title_text, pin_index)
+                current_badge = ImageTools.get_smart_badge(title_text, pin_index, price_text if has_price_val else "")
+
+            # If product pe price nahi hai, title text se saare stray dollar signs ($...) strip kardo
+            if not has_price_val:
+                title_text = re.sub(r'\$\d+(?:\.\d{1,2})?', '', title_text).strip()
+                title_text = re.sub(r'\s+', ' ', title_text)
             
             # Determine CTA Text
             current_cta = cta_text.strip() if cta_text and cta_text.strip() else CTA_BUTTONS[pin_index % len(CTA_BUTTONS)]
@@ -702,6 +752,12 @@ class ImageTools:
             prod_h = max(10, int(prod_rgb.height * scale))
             
             resized_prod = prod_rgb.resize((prod_w, prod_h), Image.Resampling.LANCZOS)
+            if HAS_PILLOW:
+                try:
+                    enhancer = ImageEnhance.Sharpness(resized_prod)
+                    resized_prod = enhancer.enhance(1.3)
+                except Exception:
+                    pass
 
             prod_cx = card_x + card_w // 2
             prod_cy = card_y + card_h // 2
@@ -731,25 +787,28 @@ class ImageTools:
             ACCENT_FILL = (*product_accent_rgb, 255)
 
             actual_price_val = price_text.strip() if price_text else ""
-            if not actual_price_val:
-                import re
-                m_p = re.search(r'\$(\d+(?:\.\d{1,2})?)', title_text + " " + badge_text)
-                if m_p:
-                    try:
-                        p_val = float(m_p.group(1))
-                        if 1.0 <= p_val <= 500.0:
-                            actual_price_val = f"${p_val:.2f}".replace(".00", "")
-                    except Exception:
-                        pass
-                        
+            
+            # Search for real price pattern in candidates (price_text, title_text, badge_text, rating_text)
+            if not actual_price_val or not re.search(r'\$\d+', actual_price_val):
+                for candidate in [price_text, title_text, badge_text, rating_text]:
+                    if candidate:
+                        m_p = re.search(r'\$(\d+(?:\.\d{1,2})?)', str(candidate))
+                        if m_p:
+                            try:
+                                p_num = float(m_p.group(1))
+                                if 1.0 <= p_num <= 999.0:
+                                    actual_price_val = f"${p_num:.2f}".replace(".00", "")
+                                    break
+                            except Exception:
+                                pass
+
+            # Sanitize price format (e.g. $49.99 or $49)
             if actual_price_val:
-                # Sanitize price format (e.g. $49.99 or $49)
-                import re
                 p_match = re.search(r'\$?(\d+(?:\.\d{1,2})?)', actual_price_val)
                 if p_match:
                     try:
                         p_num = float(p_match.group(1))
-                        if 1.0 <= p_num <= 500.0:
+                        if 1.0 <= p_num <= 999.0:
                             actual_price_val = f"${p_num:.2f}".replace(".00", "")
                         else:
                             actual_price_val = ""
@@ -757,8 +816,13 @@ class ImageTools:
                         actual_price_val = ""
                 else:
                     actual_price_val = ""
-                    
-                price_badge_str = actual_price_val.upper()
+            else:
+                actual_price_val = ""
+                
+            price_badge_str = actual_price_val.upper().strip()
+            
+            # STRICT RULE: ONLY draw upper-right price badge if price_badge_str is a valid price string starting with $
+            if len(price_badge_str) >= 2 and price_badge_str.startswith("$"):
                 price_badge_font = ImageTools._get_system_font("sans_bold", 18, category="beauty")
                 
                 pt_draw = ImageDraw.Draw(canvas)
@@ -931,7 +995,7 @@ class ImageTools:
 
             # Save high resolution JPEG
             final_img = canvas.convert("RGB")
-            final_img.save(out_path, format="JPEG", quality=95)
+            final_img.save(out_path, format="JPEG", quality=98, subsampling=0)
             logger.info("✅ VIOLET GREY + RHODE + SEPHORA Ultra-Luxury Pin generated! │ path=%s", out_path)
             
             return str(out_path)

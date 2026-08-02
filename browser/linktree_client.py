@@ -185,8 +185,36 @@ class LinktreeClient:
                     break
 
             if "accounts.google.com" in target_page.url.lower():
-                logger.info("On Google accounts page. Checking for account selectors...")
-                # If there is a list of accounts, click the first one or the one matching "thehadit"
+                logger.info("On Google accounts page. Checking for account selectors or email input...")
+                # 1. Fill email input if visible
+                try:
+                    email_input = target_page.locator('input[type="email"]').first
+                    if await email_input.count() > 0 and await email_input.is_visible():
+                        user_email = os.getenv("PINTEREST_EMAIL", "thehadit26@gmail.com")
+                        logger.info(f"Filling Google login email: {user_email}")
+                        await email_input.fill(user_email)
+                        await target_page.wait_for_timeout(1000)
+                        next_btn = target_page.locator('#identifierNext, button:has-text("Next")').first
+                        await next_btn.click()
+                        await target_page.wait_for_timeout(4000)
+                except Exception as e_err:
+                    logger.debug(f"Google email fill info: {e_err}")
+
+                # 2. Fill password input if visible
+                try:
+                    pwd_input = target_page.locator('input[type="password"]').first
+                    if await pwd_input.count() > 0 and await pwd_input.is_visible():
+                        user_pwd = os.getenv("PINTEREST_PASSWORD", "Minelazy1231@")
+                        logger.info("Filling Google login password...")
+                        await pwd_input.fill(user_pwd)
+                        await target_page.wait_for_timeout(1000)
+                        next_btn = target_page.locator('#passwordNext, button:has-text("Next")').first
+                        await next_btn.click()
+                        await target_page.wait_for_timeout(5000)
+                except Exception as p_err:
+                    logger.debug(f"Google password fill info: {p_err}")
+
+                # 3. If there is a list of accounts, click the first one or the one matching "thehadit"
                 for acc_selector in [
                     '[data-email*="thehadit" i]',
                     '[data-authuser="0"]',
@@ -196,7 +224,7 @@ class LinktreeClient:
                     '[data-email]'
                 ]:
                     acc_loc = target_page.locator(acc_selector).first
-                    if await acc_loc.count() > 0:
+                    if await acc_loc.count() > 0 and await acc_loc.is_visible():
                         logger.info(f"Clicking Google account: {acc_selector}")
                         await acc_loc.click(force=True)
                         await page.wait_for_timeout(5000)

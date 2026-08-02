@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+import re
 from dataclasses import dataclass
 
 from browser.browser_manager import BrowserManager
@@ -45,8 +46,7 @@ class GeminiWebClient:
         Navigate to Gemini, enter the prompt and optional image, and scrape the response.
         """
         logger.info("Opening Gemini Web UI...")
-        context = self.manager.context
-        page = await context.new_page()
+        page = await self.manager.new_page()
         
         try:
             # Note: User must have logged into Google previously, and session saved by BrowserManager.
@@ -306,7 +306,8 @@ CRITICAL RULES:
             "Affordable Skincare Finds 2026",
             "Viral TikTok Beauty Holy Grails 2026"
         ]
-        real_price_display = product_price.strip() if product_price else "Check Today's Price"
+        has_real_price = bool(product_price and re.search(r'\$\d+', str(product_price)))
+        real_price_display = str(product_price).strip() if has_real_price else "NO PRICE AVAILABLE (STRICT RULE: DO NOT INCLUDE ANY DOLLAR SIGN OR PRICE NUMBER IN OUTPUT)"
         rev_k = f"{product_reviews // 1000}K+" if product_reviews >= 1000 else f"{product_reviews}"
         rating_display = f"{product_rating:.1f}★ ({rev_k} REVIEWS)" if product_rating > 0 else "4.8★ BESTSELLER"
         
@@ -314,10 +315,10 @@ CRITICAL RULES:
 You are an Elite Pinterest Beauty Creative Director specializing in high-converting Pinterest affiliate pins for US women (ages 18–45).
 
 STRICT PRICE & SOCIAL PROOF INTEGRITY RULES:
-1. ACTUAL PRICE ENFORCEMENT: Use the EXACT Real Amazon Price ({real_price_display}) in the Title and Curiosity Hook!
-   - If Actual Real Amazon Price is "{real_price_display}" (e.g. "$49" or "$49.99"), you MUST use "{real_price_display}" (or the exact dollar integer like "$49").
-   - NEVER make up or hallucinate a different price (do NOT replace {real_price_display} with fake numbers like $14, $8, etc.)!
-   - If Actual Real Amazon Price is empty or "Check Today's Price", do NOT write dollar amounts in title/hook!
+1. ACTUAL PRICE ENFORCEMENT:
+   - Current Product Real Price: "{real_price_display}"
+   - IF Real Price is provided (e.g. "$24.99" or "$15"), you MUST ONLY use "{real_price_display}" (or exact rounded dollar integer like "$25") if mentioning price. NEVER invent or hallucinate any other number (do NOT replace {real_price_display} with fake numbers like $8, $12, $14, etc.)!
+   - IF Real Price is "NO PRICE AVAILABLE...", **YOU MUST STRICTLY NOT INCLUDE ANY DOLLAR SIGN ($...) OR PRICE NUMBER IN TITLE, HOOK, HEADLINE, OR BADGE TEXT!**
 2. Include Verified Social Proof Ratings ({rating_display}) in badge options to build 100% US buyer trust.
 
 STRICT GEOGRAPHIC ROUTING RULE (USA 🇺🇸, UK 🇬🇧, CANADA 🇨🇦 ONLY):
@@ -346,26 +347,19 @@ Product Description: {product_desc}
 Allowed Boards: {", ".join(allowed_boards)}.
 
 HOOKS & CTA ROTATION:
-- Hooks: "The $8 Amazon Lip Oil That Replaces $40 Dior", "The $12 Amazon Acne Patch That Erases Pimples Overnight", "This $19 Biodance Mask Gives Overnight Glass Skin", "Don't Buy Heavy Sunscreens Until You Try This $14 Zero White Cast SPF", "ONE/SIZE $18 Waterproof Spray Keeps Makeup Locked In 90° Heat", "Medicube $19 Zero Pore Pad Secret For Flawless Skin", "Back-To-School 5-Minute Skincare Routine That Erased My Acne In 7 Days", "The $8 e.l.f. Lip Oil That Replaces $40 Dior (Back-To-School Deal)"
-- TIERED PRIORITY ROTATION PROTOCOL:
-  * Tier 1 Mega-Virals (70% Allocation): Prioritize top high-CTR bestsellers: Biodance Collagen Mask ($19), Beauty of Joseon SPF 50 ($14), e.l.f. Glow Reviver Lip Oil ($8 Dior Dupe), ONE/SIZE Waterproof Spray ($18), Hero Cosmetics Mighty Patch ($12), TirTir Cushion Foundation ($15), Sol de Janeiro Cheirosa Mists ($24), Laneige Lip Mask ($19), Glow Recipe Dew Drops ($18), Medicube Zero Pore Pad ($19).
-- Badges: Maximum ONE badge (e.g. "★ Under $15", "★ Under $20", "★ Bestseller", "★ 4.8 Rating" - only if verified)
+- Hooks: "The Viral Amazon Lip Oil Everyone Is Obsessed With", "The Acne Patch Secret That Erases Pimples Overnight", "This Bio-Collagen Mask Gives Overnight Glass Skin", "Don't Buy Heavy Sunscreens Until You Try This Zero White Cast SPF", "ONE/SIZE Waterproof Spray Keeps Makeup Locked In 90° Heat", "Medicube Zero Pore Pad Secret For Flawless Skin", "Back-To-School 5-Minute Skincare Routine For Clear Skin"
+- Badges: Maximum ONE badge (e.g. "★ BESTSELLER", "★ GLASS SKIN", "★ 4.8 RATING" - only category tags, NEVER price numbers)
 - CTAs: "Shop Now →", "View on Amazon →", "See Today's Price →", "Check Price on Amazon →"
-
-Input variables:
-Product Title: {product_title}
-Product Description: {product_desc}
-Allowed Boards: {", ".join(allowed_boards)}
 
 Return ONLY a single valid JSON object with keys "image_headline", "curiosity_hook", "title", "description", "alt_text", "tags", "board", "design_template", "cta_text", "badge_text", "quality_scores" and nothing else.
 
 - Board: MUST be the exact 100% product-matched long-tail board from Allowed Boards list that perfectly matches the product category.
 - Badge_text: MUST be a 100% product-matched 1-2 word luxury aesthetic category/intent tag (e.g., "DIOR DUPE", "KOREAN SKINCARE", "OVERNIGHT MASK", "ZERO WHITE-CAST", "GLASS SKIN"). NEVER include price numbers in badge_text!
-- Curiosity_hook: strictly 6–12 words; high-converting PRICE MENTION curiosity overlay hook phrase (e.g., "The $8 Amazon Lip Oil That Replaces $40 Dior" or "This $12 Amazon Acne Patch Erased My Pimple in 7 Hours").
-- Title: strictly 60–80 characters (Default target: 70 characters max); generate a high-converting PRICE MENTION SEO title formatted as: [Price/Dupe Hook (e.g. The $8 Amazon Lip Oil...)] + [Product Name] + [High-Volume Search Keyword US/UK/CA]; no emojis; title case. (Example: "The $8 Amazon Lip Oil That Replaces $40 Dior (Back-To-School Deal)")
-- Description: strictly 400–450 characters; high-converting viral editorial copy targeted for USA 🇺🇸, UK 🇬🇧, and Canada 🇨🇦 female beauty shoppers. First 150 characters MUST be a high-volume search intent query (e.g., "Looking for the best Korean sunscreen for sensitive skin that leaves zero white cast for dewy glass skin?"). Include explicit CTA ("Shop on Amazon"). End with 5 viral targeted hashtags (e.g., "#AmazonBeautyFinds #KoreanSkincare #LipOilDupe #SephoraDupes #BeautyRoutine2026") followed by "💾 Save this pin!" as the last line.
-- Alt_text: strictly 400–450 characters; Dominant Visual Search Indexing Format for Millions of Pinterest impressions: Stack 5 high-volume search intent queries into a seamless visual description: [Exact Product Name] + [3 Problem-Solving Search Intent Phrases (e.g., zero white cast sunscreen under makeup, acne-prone lightweight moisturizer, Korean glass skin routine)] + [Visual Scene & Texture (champagne travertine, cream smear, soft studio glow, minimalist ivory white product card with upper right price tag sticker)] + [Aesthetic Search Clusters (Clean Girl Aesthetic, Sephora Luxury Beauty, Amazon Beauty Finds 2026 USA UK Canada)]. Maximize Pinterest Lens and Search Feed #1 ranking dominance.
-- Tags: comma-separated list of exactly 10 keywords (US/UK/Canada Amazon viral search terms).
+- Curiosity_hook: strictly 6–12 words; high-converting curiosity overlay hook phrase (if price available use real price, else focus on problem-solving benefit).
+- Title: strictly 60–80 characters; SEO title formatted as: [Viral Hook] + [Product Name] + [High-Volume Search Keyword US/UK/CA]; no emojis; title case.
+- Description: strictly 400–450 characters; first 150 chars search intent query. Include explicit CTA ("Shop on Amazon"). End with 5 viral targeted hashtags followed by "💾 Save this pin!" as the last line.
+- Alt_text: strictly 400–450 characters.
+- Tags: comma-separated list of exactly 10 keywords.
 - Board: choose best matching board from Allowed Boards using keyword relevance.
 - Design_template: pick one of ["Template A", "Template B", "Template C", "Template D", "Template E"].
 - Cta_text: select one CTA from approved rotation list (e.g. "View on Amazon →").
@@ -373,34 +367,12 @@ Return ONLY a single valid JSON object with keys "image_headline", "curiosity_ho
 - Quality_scores: object with scores out of 100 for luxury_score, ctr_score, pinterest_score, mobile_score, trust_score, brand_consistency. ALL MUST BE >= 90.
 
 Validation: if any rule fails or scores < 90, regenerate internally before returning valid JSON.
-
-Output JSON Format Example:
-{{
-  "image_headline": "Hyaluronic Glow Serum",
-  "curiosity_hook": "This $14 Serum Cleared My Acne & Dark Spots in 7 Days",
-  "title": "The $14 Amazon Hyaluronic Glow Serum That Cleared Dark Spots — Glass Skin Routine",
-  "description": "Looking for the best hydrating serum for dry skin to get glowing Korean glass skin in the US, UK, and Canada? This dermatologist recommended hyaluronic serum deeply plumps and locks moisture all day for a dewy luxury finish. Shop on Amazon for instant glow. #GlassSkin #AmazonBeautyFinds #KoreanSkincare #SephoraDupes #GlowSerum 💾 Save this pin!",
-  "alt_text": "Close-up of a clear glass dropper bottle of Hyaluronic Glow Serum positioned on a minimalist warm ivory background inside a rounded white product card with a green price tag badge; glossy dewy gel texture on back of hand; model with poreless glass skin wearing Clean Girl Aesthetic makeup under warm studio lighting; referencing Sephora Beauty Dupes, TikTok Beauty Trends, and Amazon Skincare Favorites USA UK Canada 2026.",
-  "tags": "hyaluronic acid serum,glass skin serum,dewy skin,hydrating serum,plumping serum,dermatologist recommended,clean beauty,tiktok beauty trends,sephora favorites,glow serum",
-  "board": "Glow Serums & Glass Skin",
-  "design_template": "Template B",
-  "cta_text": "View on Amazon →",
-  "badge_text": "GLASS SKIN",
-  "quality_scores": {{
-    "luxury_score": 98,
-    "ctr_score": 97,
-    "pinterest_score": 99,
-    "mobile_score": 96,
-    "trust_score": 98,
-    "brand_consistency": 97
-  }}
-}}
 """
+
         response_text = await self._send_prompt(prompt, image_path=image_path)
         
         # Parse JSON
         try:
-            # Extract content between first { and last }
             start_idx = response_text.find("{")
             end_idx = response_text.rfind("}")
             if start_idx != -1 and end_idx != -1:
@@ -411,28 +383,64 @@ Output JSON Format Example:
             data = json.loads(clean_json)
             raw_headline = data.get("image_headline", "").strip()
             if not raw_headline or len(raw_headline.split()) > 7:
-                # Fallback to first 5 words of product title
                 raw_headline = " ".join(product_title.split()[:5])
 
+            raw_title = data.get("title", product_title[:100]).strip()
+            raw_hook = data.get("curiosity_hook", "").strip()
+            raw_badge = data.get("badge_text", "").strip()
+
+            # Post-generation sanitization: If NO real price is available, strip any stray dollar signs/price numbers!
+            if not has_real_price:
+                raw_title = re.sub(r'\$\d+(?:\.\d{1,2})?', '', raw_title).strip()
+                raw_title = re.sub(r'\s+', ' ', raw_title)
+                raw_hook = re.sub(r'\$\d+(?:\.\d{1,2})?', '', raw_hook).strip()
+                raw_hook = re.sub(r'\s+', ' ', raw_hook)
+                raw_headline = re.sub(r'\$\d+(?:\.\d{1,2})?', '', raw_headline).strip()
+                raw_badge = re.sub(r'\$\d+(?:\.\d{1,2})?', '', raw_badge).strip()
+
             seo_data = PinterestSEOData(
-                title=data.get("title", product_title[:100]).strip(),
+                title=raw_title,
                 description=data.get("description", "Check out this amazing beauty product on Amazon!").strip(),
                 alt_text=data.get("alt_text", f"A detailed product shot of {product_title}").strip()[:400],
                 tags=data.get("tags", "beauty, skincare, shopping, makeup").strip(),
                 board=data.get("board", "Amazon Beauty Finds").strip(),
                 image_headline=raw_headline,
-                curiosity_hook=data.get("curiosity_hook", "").strip()
+                curiosity_hook=raw_hook,
+                badge_text=raw_badge,
+                cta_text=data.get("cta_text", "View on Amazon →").strip()
             )
             return None, seo_data
         except Exception as e:
             logger.error(f"Failed to parse SEO JSON: {e}")
             fallback_headline = " ".join(product_title.split()[:5])
+            if not has_real_price:
+                fallback_headline = re.sub(r'\$\d+(?:\.\d{1,2})?', '', fallback_headline).strip()
 
-            fallback_desc = f"Looking for the best {product_title} for your beauty routine? Discover this top-rated Amazon find for glowing glass skin. Buy on Amazon. #BeautyFinds 💾 Save this pin!"
+            clean_short = " ".join(re.sub(r'[^\w\s-]', '', product_title).strip().split()[:6])
+            t_low = product_title.lower()
+            if any(k in t_low for k in ["bronzer", "contour", "blush", "highlighter", "foundation", "powder", "setting spray", "primer"]):
+                copy_body = "Achieve an effortless sun-kissed glow and seamless matte finish with this Sephora viral makeup essential. Long-lasting, lightweight, and perfect for your daily clean girl makeup routine."
+                hashtags = "#AmazonBeautyFinds #SephoraDupes #CleanGirlMakeup #MakeupMustHaves #ViralBeauty"
+            elif any(k in t_low for k in ["lip oil", "lip gloss", "lip balm", "lip sleeping mask", "tint"]):
+                copy_body = "Get ultra-hydrated, high-shine glass lips with this lightweight viral lip treatment. Non-sticky, deeply moisturizing formula for effortless everyday glamour."
+                hashtags = "#AmazonBeautyFinds #LipOil #SephoraDupes #GlassLips #BeautyFavorites"
+            elif any(k in t_low for k in ["hair", "shampoo", "conditioner", "spray", "bond", "frizz"]):
+                copy_body = "Transform your hair care routine with this salon-quality hydrating formula. Protects against humidity, repairs split ends, and delivers 3X smoother, glossy locks."
+                hashtags = "#AmazonBeautyFinds #HairCareSecrets #AntiFrizz #SephoraDupes #ShinyHair"
+            else:
+                copy_body = "This high-performance formula is the ultimate Sephora & Amazon beauty find! Deeply nourishes, restores skin barrier, and gives you a healthy, glowing complexion."
+                hashtags = "#AmazonBeautyFinds #SkincareRoutine #SephoraDupes #GlassSkin #CleanGirlAesthetic"
+
+            fallback_desc = (
+                f"Looking for the best {clean_short} for your everyday beauty routine in the US, UK, and Canada? "
+                f"{copy_body} "
+                f"Click the link to check live price & read 15,000+ verified 5-star customer reviews on Amazon. "
+                f"💾 Save this pin to your Amazon Beauty Finds board! {hashtags}"
+            )
             fallback_alt = f"A high-quality aesthetic product shot showing the details of {product_title} placed on a clean marble surface with natural California sunlight, matching the Clean Girl Makeup and TikTok Beauty Trends aesthetic."[:400]
             
             return None, PinterestSEOData(
-                title=product_title[:70], 
+                title=f"{clean_short} | Sephora & Amazon Viral Beauty Finds 2026"[:70], 
                 description=fallback_desc, 
                 alt_text=fallback_alt, 
                 tags="beauty, skincare, makeup, shopping", 

@@ -78,6 +78,21 @@ class AmazonClient:
         """
         if not url:
             return ""
+            
+    @staticmethod
+    def is_valid_product_image_url(url: str) -> bool:
+        """Filter out generic Amazon Prime logos, banners, sprites, and transparent placeholders."""
+        if not url or not isinstance(url, str):
+            return False
+        u_lower = url.lower().strip()
+        blocked_keywords = [
+            "prime", "prime_logo", "logo", "sprite", "pixel", "transparent", "banner", 
+            "nav-", "badge", "icon", "avatar", "btn_", "play-store", "app-store",
+            "amazon_prime", "primevideo", "avd", "g-system", "trans_pix", "1x1"
+        ]
+        if any(bk in u_lower for bk in blocked_keywords):
+            return False
+        return True
         
         import re
         match = re.search(r'/(?:dp|gp/product|gp/video|d)/([A-Z0-9]{10})', url, re.IGNORECASE)
@@ -101,6 +116,47 @@ class AmazonClient:
         except Exception:
             return url
 
+    async def ensure_direct_product_url(self, url_or_keyword: str) -> str:
+        """
+        Guarantees that any link or keyword returns a clean direct ASIN product page URL
+        (https://www.amazon.com/dp/ASIN?tag=savvyshop0965-20).
+        If given a search URL (/s?k=...) or keyword, searches Amazon to resolve the top product ASIN.
+        """
+        if not url_or_keyword:
+            return ""
+
+        import re
+        # Case 1: Already has a valid ASIN (/dp/ASIN or /gp/product/ASIN)
+        match = re.search(r'/(?:dp|gp/product|gp/video|d)/([A-Z0-9]{10})', url_or_keyword, re.IGNORECASE)
+        if match:
+            asin = match.group(1).upper()
+            return f"https://www.amazon.com/dp/{asin}?tag={self.affiliate_tag}"
+
+        # Case 2: It's a search URL (/s?k=...) or raw product title/keyword
+        query = url_or_keyword
+        if "k=" in url_or_keyword:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(url_or_keyword)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "k" in qs and qs["k"]:
+                query = qs["k"][0]
+
+        logger.info("Resolving search link/keyword '%s' to direct ASIN product page...", query[:50])
+        direct_url = await self.search_products(query)
+        if not direct_url and " " in query:
+            # Retry with simplified keyword (first 4 words) if detailed search failed
+            simple_kw = " ".join(query.split()[:4])
+            logger.info("Retrying search resolution with simplified keyword: '%s'...", simple_kw)
+            direct_url = await self.search_products(simple_kw)
+
+        if direct_url:
+            match = re.search(r'/(?:dp|gp/product|gp/video|d)/([A-Z0-9]{10})', direct_url, re.IGNORECASE)
+            if match:
+                asin = match.group(1).upper()
+                return f"https://www.amazon.com/dp/{asin}?tag={self.affiliate_tag}"
+
+        return self.add_affiliate_tag(url_or_keyword, self.affiliate_tag)
+
     async def search_products(
         self, 
         keyword: str, 
@@ -120,8 +176,7 @@ class AmazonClient:
             The raw Amazon product URL, or None if no products found.
         """
         logger.info("Searching Amazon for: '%s' (Quality Shield: Rating>=%.1f★, Reviews>=%d)...", keyword, min_rating, min_reviews)
-        context = self.manager.context
-        page = await context.new_page()
+        page = await self.manager.new_page()
         
         try:
             # Navigate to Amazon Beauty search specifically
@@ -231,19 +286,23 @@ class AmazonClient:
             AmazonProduct dataclass containing title, desc, image, rating, review_count, and tagged URL.
         """
         logger.info("Fetching product details from: %s", url)
-        context = self.manager.context
-        page = await context.new_page()
+        page = await self.manager.new_page()
         
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2000)
             
-            # 1. Extract Title
+            # 1. Extract Title (#productTitle checked explicitly first)
             title = ""
-            title_loc = page.locator("#productTitle, #title, #titleSection h1, h1.a-size-large, span#productTitle").first
-            if await title_loc.count() > 0:
-                title = (await title_loc.inner_text()).strip()
-            
+            for sel in ["#productTitle", "span#productTitle", "#titleSection h1", "#title h1", "h1.a-size-large"]:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    t_raw = (await loc.inner_text()).strip()
+                    t_clean = t_raw.split("\n")[0].strip()
+                    if t_clean and not any(check in t_clean.lower() for check in ["adding to cart", "added to cart", "robot check", "captcha", "something went wrong"]):
+                        title = t_clean
+                        break
+
             if not title or title == "Unknown Product":
                 meta_title = page.locator("meta[property='og:title'], meta[name='title']").first
                 if await meta_title.count() > 0:
@@ -257,7 +316,7 @@ class AmazonClient:
                 except Exception:
                     pass
             
-            if not title or any(check in title.lower() for check in ["robot check", "captcha", "something went wrong"]):
+            if not title or any(check in title.lower() for check in ["robot check", "captcha", "something went wrong", "adding to cart", "added to cart"]):
                 title = "Unknown Product"
             
             # Anti-Book Check on extracted Amazon product title
@@ -274,28 +333,65 @@ class AmazonClient:
             if not description:
                 description = f"Check out this amazing {title} on Amazon!"
                 
-            # 3. Extract High-Res Image
+            # 3. Extract High-Res Product Image (Strictly Filter Out Prime Logos & Banners)
             image_url = ""
             try:
-                img_loc = page.locator("#landingImage, #imgBlkFront, #main-image, #imgTagWrapperId img, #landingImageContainer img, img[data-a-dynamic-image]").first
-                if await img_loc.count() > 0:
-                    image_url = await img_loc.get_attribute("src", timeout=2000) or ""
-                    hires = await img_loc.get_attribute("data-old-hires", timeout=1000)
-                    if hires:
-                        image_url = hires
-                    dyn_img = await img_loc.get_attribute("data-a-dynamic-image", timeout=1000)
-                    if dyn_img:
-                        import json
-                        try:
-                            img_dict = json.loads(dyn_img)
-                            if img_dict:
-                                image_url = list(img_dict.keys())[0]
-                        except Exception:
-                            pass
-                if not image_url:
+                candidate_urls = []
+                
+                # Check specific product image elements first (ignoring banners/nav logos)
+                image_selectors = [
+                    "#landingImage", 
+                    "#imgBlkFront", 
+                    "#main-image", 
+                    "#imgTagWrapperId img", 
+                    "#landingImageContainer img", 
+                    "#leftCol img[data-a-dynamic-image]", 
+                    "#imageBlock img[data-a-dynamic-image]"
+                ]
+                
+                for sel in image_selectors:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0:
+                        src = await loc.get_attribute("src", timeout=1000) or ""
+                        hires = await loc.get_attribute("data-old-hires", timeout=1000) or ""
+                        dyn = await loc.get_attribute("data-a-dynamic-image", timeout=1000) or ""
+                        
+                        for candidate in [hires, src]:
+                            if candidate and self.is_valid_product_image_url(candidate):
+                                candidate_urls.append(candidate)
+                                
+                        if dyn:
+                            import json
+                            try:
+                                img_dict = json.loads(dyn)
+                                if img_dict:
+                                    sorted_imgs = sorted(
+                                        img_dict.items(),
+                                        key=lambda item: item[1][0] * item[1][1] if isinstance(item[1], (list, tuple)) and len(item[1]) >= 2 else 0,
+                                        reverse=True
+                                    )
+                                    for img_item in sorted_imgs:
+                                        if self.is_valid_product_image_url(img_item[0]):
+                                            candidate_urls.append(img_item[0])
+                                            break
+                            except Exception:
+                                pass
+                        if candidate_urls:
+                            break
+
+                # Fallback to OpenGraph meta image if no valid candidate found
+                if not candidate_urls:
                     meta_img = page.locator("meta[property='og:image']").first
                     if await meta_img.count() > 0:
-                        image_url = await meta_img.get_attribute("content") or ""
+                        og_val = await meta_img.get_attribute("content") or ""
+                        if self.is_valid_product_image_url(og_val):
+                            candidate_urls.append(og_val)
+
+                if candidate_urls:
+                    image_url = candidate_urls[0]
+
+                from tools.image_tools import ImageTools
+                image_url = ImageTools.sanitize_high_res_url(image_url)
             except Exception as e:
                 logger.warning(f"Could not extract Amazon image: {e}")
                 
@@ -321,35 +417,75 @@ class AmazonClient:
             except Exception as e:
                 logger.debug(f"Could not extract review count: {e}")
                 
-            # 6. Extract Actual Real Price
+            # 6. Extract Actual Real Price (Robust multi-stage Amazon price parser)
             price = ""
             try:
-                whole_loc = page.locator("span.a-price-whole").first
-                frac_loc = page.locator("span.a-price-fraction").first
-                if await whole_loc.count() > 0 and await frac_loc.count() > 0:
-                    w = (await whole_loc.inner_text()).strip().replace(".", "").replace(",", "")
-                    f = (await frac_loc.inner_text()).strip()
-                    if w.isdigit() and f.isdigit():
-                        price = f"${w}.{f}"
+                import re
+                
+                # Priority 1: High-precision priceToPay / apex selectors (excluding strikethrough list prices .a-text-price)
+                targeted_selectors = [
+                    "#corePriceDisplay_desktop_feature_div span.a-price.aok-align-center span.a-offscreen",
+                    "#corePriceDisplay_desktop_feature_div .priceToPay span.a-offscreen",
+                    "#corePrice_feature_div .priceToPay span.a-offscreen",
+                    "#corePrice_desktop .priceToPay span.a-offscreen",
+                    "span.apexPriceToPay span.a-offscreen",
+                    "#apex_desktop .priceToPay span.a-offscreen",
+                    "#priceblock_dealprice",
+                    "#priceblock_ourprice",
+                    "#priceblock_saleprice",
+                    "span.a-price:not(.a-text-price) span.a-offscreen",
+                ]
+                
+                for sel in targeted_selectors:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0:
+                        raw_p = await loc.get_attribute("textContent") or await loc.inner_text() or ""
+                        raw_p = raw_p.strip()
+                        m = re.search(r'\$\s*(\d+(?:\.\d{1,2})?)', raw_p)
+                        if m:
+                            try:
+                                val = float(m.group(1))
+                                if 1.0 <= val <= 999.0:
+                                    price = f"${val:.2f}".replace(".00", "")
+                                    break
+                            except ValueError:
+                                pass
 
+                # Priority 2: Whole + Fraction inside priceToPay or main price container
                 if not price:
-                    price_loc = page.locator("span.a-price span.a-offscreen, #priceblock_ourprice, #priceblock_dealprice, #corePrice_feature_div span.a-offscreen").first
-                    if await price_loc.count() > 0:
-                        raw_p = await price_loc.inner_text() or await price_loc.get_attribute("textContent") or ""
-                        raw_p = raw_p.strip().replace("\n", "").replace(" ", "")
-                        
-                        import re
-                        m1 = re.search(r'\$?(\d+)\.(\d{2})', raw_p)
-                        if m1:
-                            price = f"${m1.group(1)}.{m1.group(2)}"
-                        else:
-                            m2 = re.search(r'\$?(\d+)', raw_p)
-                            if m2:
-                                num = m2.group(1)
-                                if len(num) >= 3:
-                                    price = f"${num[:-2]}.{num[-2:]}"
-                                else:
-                                    price = f"${num}"
+                    w_loc = page.locator(".priceToPay span.a-price-whole, #corePriceDisplay_desktop_feature_div span.a-price-whole, span.a-price:not(.a-text-price) span.a-price-whole").first
+                    if await w_loc.count() > 0:
+                        w_raw = await w_loc.get_attribute("textContent") or await w_loc.inner_text() or ""
+                        f_loc = page.locator(".priceToPay span.a-price-fraction, #corePriceDisplay_desktop_feature_div span.a-price-fraction, span.a-price:not(.a-text-price) span.a-price-fraction").first
+                        f_raw = await f_loc.get_attribute("textContent") or await f_loc.inner_text() if await f_loc.count() > 0 else "00"
+                        w = re.sub(r'\D', '', w_raw)
+                        f = re.sub(r'\D', '', f_raw)
+                        if w:
+                            f_clean = f[:2] if f else "00"
+                            price = f"${w}.{f_clean}".replace(".00", "")
+
+                # Priority 3: Fallback regex on buy box / right column / main dp container text
+                if not price:
+                    buybox_text = ""
+                    for text_sel in ["#buyBoxAccordion", "#rightCol", "#dp-container", "#centerCol"]:
+                        t_loc = page.locator(text_sel).first
+                        if await t_loc.count() > 0:
+                            buybox_text = await t_loc.inner_text()
+                            if buybox_text and "$" in buybox_text:
+                                break
+                                
+                    if buybox_text:
+                        prices = re.findall(r'\$\s*(\d{1,3}(?:\.\d{2})?)', buybox_text)
+                        valid_prices = []
+                        for p_str in prices:
+                            try:
+                                val = float(p_str)
+                                if 1.0 <= val <= 500.0:
+                                    valid_prices.append(val)
+                            except ValueError:
+                                pass
+                        if valid_prices:
+                            price = f"${valid_prices[0]:.2f}".replace(".00", "")
             except Exception as e:
                 logger.debug(f"Could not extract price: {e}")
 
@@ -382,8 +518,7 @@ class AmazonClient:
         Returns a comma-separated string of product titles.
         """
         logger.info("Fetching Amazon US Beauty Best Sellers...")
-        context = self.manager.context
-        page = await context.new_page()
+        page = await self.manager.new_page()
         
         try:
             await page.goto("https://www.amazon.com/Best-Sellers-Beauty/zgbs/beauty", wait_until="domcontentloaded", timeout=60000)

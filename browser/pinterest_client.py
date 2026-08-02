@@ -35,6 +35,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -488,27 +489,66 @@ class PinterestClient:
             # 1. Upload Image
             logger.debug("Uploading image...")
             uploaded = False
-            for selector in [
-                'input[type="file"][accept*="image"]',
-                'input[type="file"]',
-                'input[accept="image/*"]'
-            ]:
-                locs = await page.locator(selector).all()
-                for input_el in locs:
-                    try:
-                        await input_el.set_input_files(image_path)
-                        await page.wait_for_timeout(3000)
-                        # Check if edit button or image preview is visible
-                        if await page.locator('button:has-text("Edit"), button:has-text("Delete")').count() > 0:
-                            uploaded = True
-                            break
-                    except Exception:
-                        pass
-                if uploaded:
+            
+            # Strategy A: Native file chooser via dropzone click
+            try:
+                dropzone = page.locator('[data-test-id="pin-draft-media-slot"], [data-test-id="media-empty-view"], [data-test-id^="media-upload-input"]').first
+                if await dropzone.count() > 0 and await dropzone.is_visible():
+                    async with page.expect_file_chooser(timeout=5000) as fc_info:
+                        await dropzone.click(force=True)
+                    file_chooser = await fc_info.value
+                    await file_chooser.set_files(image_path)
+                    await page.wait_for_timeout(2000)
+                    logger.info("Uploaded image via native file chooser dropzone click.")
+            except Exception as fc_err:
+                logger.debug(f"File chooser dropzone click strategy skipped: {fc_err}")
+
+            # Polling check if image preview appeared
+            for _ in range(5):
+                preview_count = await page.locator('button:has-text("Edit"), button:has-text("Delete"), [data-test-id*="media"] img, [aria-label*="media" i] img, img[src^="blob:"], img[src*="pinimg"]').count()
+                if preview_count > 0:
+                    uploaded = True
+                    logger.info("Image upload confirmed (preview element detected).")
                     break
+                await page.wait_for_timeout(1000)
+
+            # Strategy B: Fallback direct set_input_files on file inputs
+            if not uploaded:
+                for attempt in range(1, 4):
+                    for selector in [
+                        '[data-test-id^="media-upload-input"]',
+                        'input[type="file"][accept*="image"]',
+                        'input[type="file"]',
+                        'input[accept="image/*"]'
+                    ]:
+                        locs = await page.locator(selector).all()
+                        for input_el in locs:
+                            try:
+                                await input_el.set_input_files(image_path)
+                                await page.wait_for_timeout(2000)
+                                
+                                for _ in range(5):
+                                    preview_count = await page.locator('button:has-text("Edit"), button:has-text("Delete"), [data-test-id*="media"] img, [aria-label*="media" i] img, img[src^="blob:"], img[src*="pinimg"]').count()
+                                    if preview_count > 0:
+                                        uploaded = True
+                                        logger.info("Image upload confirmed (preview element detected).")
+                                        break
+                                    await page.wait_for_timeout(1000)
+                                    
+                                if uploaded:
+                                    break
+                            except Exception as img_err:
+                                if "closed" in str(img_err).lower() or "target" in str(img_err).lower():
+                                    raise img_err
+                                logger.debug(f"Image upload attempt {attempt} error: {img_err}")
+                        if uploaded:
+                            break
+                    if uploaded:
+                        break
+                    await page.wait_for_timeout(2000)
 
             if not uploaded:
-                logger.warning("Image upload preview elements not detected, hoping file input set succeeded.")
+                raise Exception(f"Pin image upload failed: Image preview element was not detected on Pinterest pin builder for file '{image_path}'. Cannot publish pin without image.")
 
             # 2. Fill Title
             logger.debug("Filling title...")
@@ -557,7 +597,7 @@ class PinterestClient:
                             await js_handle.as_element().click()
                             await page.keyboard.press("Control+A")
                             await page.keyboard.press("Backspace")
-                            await page.keyboard.type(title[:100], delay=10)
+                            await page.keyboard.insert_text(title[:100])
                             logger.info("Successfully filled Pinterest title via JS placeholder search.")
                             title_input = None  # Mark as already handled
                     except Exception as js_e:
@@ -569,14 +609,20 @@ class PinterestClient:
                     await page.wait_for_timeout(200)
                     await title_input.press("Control+A")
                     await title_input.press("Backspace")
-                    await page.keyboard.type(title[:100], delay=10)
-                    logger.info("Successfully filled Pinterest title via keyboard type.")
+                    await page.keyboard.insert_text(title[:100])
+                    await title_input.evaluate("""el => {
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""")
+                    logger.info("Successfully filled Pinterest title via keyboard insert_text.")
                 else:
                     logger.warning("Could not find title input field.")
             except Exception as e:
+                if "closed" in str(e).lower() or "target" in str(e).lower():
+                    raise e
                 logger.warning(f"Exception filling title: {e}")
 
-            # 3. Fill Description
+            # 3. Fill Description (SEO)
             logger.debug("Filling description...")
             try:
                 desc_input = await self._find_visible_locator(page, [
@@ -621,49 +667,36 @@ class PinterestClient:
                 if desc_input:
                     await desc_input.scroll_into_view_if_needed()
                     await desc_input.click(force=True)
-                    await page.wait_for_timeout(500)
+                    await page.wait_for_timeout(300)
                     
-                    # 1. Try setting value / innerText via JS + dispatch React events
-                    try:
-                        await desc_input.evaluate("""(el, text) => {
-                            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-                                el.value = text;
-                                el.dispatchEvent(new Event('input', { bubbles: true }));
-                                el.dispatchEvent(new Event('change', { bubbles: true }));
-                            } else {
-                                el.innerText = text;
-                                el.dispatchEvent(new Event('input', { bubbles: true }));
-                            }
-                        }""", description)
-                        await page.wait_for_timeout(500)
-                    except Exception as js_err:
-                        logger.debug(f"JS description injection fallback: {js_err}")
-
-                    # 2. Follow up with focus and keyboard typing for full React synthetic event trigger
-                    try:
+                    # 1. Direct fill for standard textarea or input
+                    is_standard_input = await desc_input.evaluate("el => el.tagName === 'TEXTAREA' || el.tagName === 'INPUT'")
+                    if is_standard_input:
+                        await desc_input.fill(description)
+                        await page.wait_for_timeout(300)
+                    else:
+                        # 2. Native Draft.js contenteditable typing via focus + Select All + Backspace + insert_text
                         await desc_input.focus()
-                        await desc_input.press("Control+A")
-                        await desc_input.press("Backspace")
-                        await page.keyboard.type(description, delay=5)
-                        await page.wait_for_timeout(1000)
-                    except Exception as type_err:
-                        logger.debug(f"Keyboard description type fallback: {type_err}")
-
-                    # 3. Dispatch final input, change, and blur events so React state commits
-                    try:
-                        await desc_input.evaluate("""el => {
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                            el.dispatchEvent(new Event('blur', { bubbles: true }));
-                        }""")
-                    except Exception:
-                        pass
+                        await page.keyboard.press("Control+A")
+                        await page.keyboard.press("Backspace")
+                        await page.wait_for_timeout(200)
+                        await page.keyboard.insert_text(description)
+                        await page.wait_for_timeout(300)
                         
-                    await page.wait_for_timeout(1000)
-                    logger.info("Successfully filled Pinterest description.")
+                    # Dispatch synthetic React input/change events to ensure state commits
+                    await desc_input.evaluate("""el => {
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.dispatchEvent(new Event('blur', { bubbles: true }));
+                    }""")
+
+                    final_desc_text = await desc_input.evaluate("el => (el.innerText || el.value || el.textContent || '').trim()")
+                    logger.info("Successfully filled Pinterest SEO description (%d chars). Sample: '%s'", len(final_desc_text), final_desc_text[:60])
                 else:
                     logger.warning("Could not find description input field.")
             except Exception as e:
+                if "closed" in str(e).lower() or "target" in str(e).lower():
+                    raise e
                 logger.warning(f"Could not fill description: {e}")
 
             # 4. Fill Link (optional)
@@ -696,6 +729,8 @@ class PinterestClient:
                     else:
                         logger.warning("Could not find destination link input field.")
                 except Exception as e:
+                    if "closed" in str(e).lower() or "target" in str(e).lower():
+                        raise e
                     logger.warning(f"Exception filling destination link: {e}")
 
             # 4b. Fill Alt Text (optional)
@@ -763,6 +798,8 @@ class PinterestClient:
                     else:
                          logger.warning("Could not find 'Add alt text' button")
                 except Exception as e:
+                    if "closed" in str(e).lower() or "target" in str(e).lower():
+                        raise e
                     logger.warning(f"Exception filling alt text: {e}")
 
             # 5. Select Board
@@ -777,6 +814,8 @@ class PinterestClient:
                     pass
                 await page.wait_for_timeout(1000)
             except Exception as e:
+                if "closed" in str(e).lower() or "target" in str(e).lower():
+                    raise e
                 logger.warning(f"Could not click board dropdown: {e}")
             
             # Type board name in the search field to filter
@@ -819,6 +858,9 @@ class PinterestClient:
                         await opt.click(force=True)
                         logger.info("Found and clicked board option: %s", board_name)
                         found = True
+                        await page.wait_for_timeout(1000)
+                        await page.keyboard.press("Escape")
+                        await page.wait_for_timeout(500)
                         break
             except Exception as e:
                 logger.warning("Error searching options list: %s", e)
@@ -837,6 +879,9 @@ class PinterestClient:
                         await loc.click(force=True)
                         logger.info("Clicked board option using selector: %s", selector)
                         found = True
+                        await page.wait_for_timeout(1000)
+                        await page.keyboard.press("Escape")
+                        await page.wait_for_timeout(500)
                         break
                         
             if not found:
@@ -937,97 +982,93 @@ class PinterestClient:
                         raise Exception(f"Failed to select or create board: {board_name}")
             # 6. Save Pin
             logger.debug("Saving pin...")
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
+            await page.keyboard.press('Escape')
+            await page.wait_for_timeout(500)
             await page.screenshot(path='before_publish.png', full_page=True)
             try:
                 publish_btn = None
                 for selector in [
                     '[data-test-id="board-dropdown-save-button"]',
-                    'button:has-text("Publish")',
-                    'div[role="button"]:has-text("Publish")',
                     '[data-test-id="pin-builder-save-btn"]',
+                    'button:has-text("Publish")',
+                    'button:has-text("Save")',
+                    'div[role="button"]:has-text("Publish")',
+                    'div[role="button"]:has-text("Save")',
                 ]:
                     loc = page.locator(selector).first
-                    if await loc.count() > 0:
+                    if await loc.count() > 0 and await loc.is_visible():
                         publish_btn = loc
                         break
                         
                 if publish_btn:
                     await publish_btn.click(force=True)
                     logger.info("Clicked Publish button.")
+                    await page.wait_for_timeout(1500)
                 else:
-                    # Try text fallback
                     publish_btn_text = page.get_by_text("Publish", exact=True).first
-                    if await publish_btn_text.count() > 0:
+                    if await publish_btn_text.count() > 0 and await publish_btn_text.is_visible():
                         await publish_btn_text.click(force=True)
                         logger.info("Clicked Publish button by text.")
+                        await page.wait_for_timeout(1500)
                     else:
-                        logger.error("Could not find Publish button by any selector or text.")
+                        raise Exception("Could not find visible Publish button on Pinterest pin builder.")
             except Exception as e:
+                if "closed" in str(e).lower() or "target" in str(e).lower():
+                    raise e
                 logger.error(f"Failed to click Publish button: {e}")
 
-            # 7. Wait for Success Toast/Confirmation + URL redirect
-            logger.debug("Waiting for success confirmation...")
-            try:
-                success_element = None
-                # Give Pinterest up to 25s total to show success toast (5 selectors x 5s each)
-                for selector in [
+            # 7. Fast Polling Loop for Success Confirmation (URL redirect, Toast, Links)
+            logger.debug("Polling for publication success indicators...")
+            import time
+            start_time = time.time()
+
+            while time.time() - start_time < 25:
+                current_url = page.url
+                # Indicator 1: URL redirect to /pin/<id>/
+                if "/pin/" in current_url and "pin-builder" not in current_url:
+                    logger.info(f"🎉 Pin published successfully! (Detected URL redirect: {current_url})")
+                    return current_url
+
+                # Indicator 2: Any pin link on page (e.g. "See your Pin", "View", "Saved to")
+                for link_sel in [
+                    'a[href*="/pin/"]',
+                    'a:has-text("See your Pin")',
+                    'a:has-text("See it now")',
+                    'a:has-text("View")',
+                    'a:has-text("Saved to")'
+                ]:
+                    link_loc = page.locator(link_sel).first
+                    if await link_loc.count() > 0:
+                        href = await link_loc.get_attribute('href')
+                        if href and "/pin/" in href and "pin-builder" not in href:
+                            pin_url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
+                            logger.info(f"🎉 Pin published successfully! (Extracted Pin link: {pin_url})")
+                            return pin_url
+
+                # Indicator 3: Toast or success message visible
+                for toast_sel in [
                     '[data-test-id="toast"]',
+                    '[role="alert"]',
                     'div:has-text("You created a Pin!")',
                     'div:has-text("Saved to")',
-                    'a:has-text("See your Pin")',
-                    'a:has-text("See it now")'
+                    'div:has-text("Saved")',
+                    'div:has-text("Published")'
                 ]:
-                    loc = page.locator(selector).first
-                    try:
-                        await loc.wait_for(state="visible", timeout=5000)
-                        success_element = loc
-                        break
-                    except Exception:
-                        continue
-
-                if success_element:
-                    logger.info("Pin published successfully (toast confirmed)!")
-                    for pin_link_selector in [
-                        'a[href*="/pin/"]',
-                        'a:has-text("See your Pin")',
-                        'a:has-text("See it now")'
-                    ]:
-                        link_loc = page.locator(pin_link_selector).first
-                        if await link_loc.count() > 0:
-                            href = await link_loc.get_attribute('href')
+                    toast_loc = page.locator(toast_sel).first
+                    if await toast_loc.count() > 0 and await toast_loc.is_visible():
+                        logger.info("🎉 Pin published successfully! (Toast/Success message detected)")
+                        link_inside = toast_loc.locator('a[href*="/pin/"]').first
+                        if await link_inside.count() > 0:
+                            href = await link_inside.get_attribute('href')
                             if href:
                                 pin_url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
-                                logger.info(f"Extracted Pin URL: {pin_url}")
                                 return pin_url
-                else:
-                    logger.warning("Toast not detected. Waiting up to 10s for page URL redirect to /pin/...")
+                        return page.url if ("/pin/" in page.url and "pin-builder" not in page.url) else f"{self.BASE_URL}/pin-builder/success"
 
-                # Fallback: wait for URL to change from /pin-builder/ to actual /pin/<id>/
-                try:
-                    await page.wait_for_function(
-                        "() => window.location.href.includes('/pin/') && !window.location.href.includes('pin-builder')",
-                        timeout=10000
-                    )
-                    final_url = page.url
-                    logger.info(f"Pin URL detected via redirect: {final_url}")
-                    return final_url
-                except Exception:
-                    # Check current URL one more time
-                    current_url = page.url
-                    if "/pin/" in current_url and "pin-builder" not in current_url:
-                        logger.info(f"Pin URL from current page: {current_url}")
-                        return current_url
+                await page.wait_for_timeout(500)
 
-                    logger.warning("Could not confirm pin publish via toast or URL redirect. Pin may still be live on Pinterest.")
-            except Exception as e:
-                logger.warning(f"Error checking success confirmation: {e}")
-
-            # Last resort: check if we're no longer on pin-builder
-            final_url = page.url
-            if "/pin/" in final_url and "pin-builder" not in final_url:
-                return final_url
-            return "https://www.pinterest.com/pin-builder/"
+            raise Exception("Pin publication failed: Clicked Publish button but Pinterest did not confirm publication within 25 seconds.")
 
         except PlaywrightTimeoutError as exc:
             raise ElementNotFoundError(f"Timed out waiting for element during pin creation: {exc}") from exc

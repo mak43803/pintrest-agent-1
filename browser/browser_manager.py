@@ -106,6 +106,16 @@ class BrowserManager:
             import os
             user_data_dir = str(PROJECT_ROOT / "browser_session")
 
+            # Clean up stale Chrome ProcessSingleton lock files if previous session crashed
+            for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+                lock_file = PROJECT_ROOT / "browser_session" / lock_name
+                try:
+                    if lock_file.exists():
+                        lock_file.unlink()
+                        logger.info("Cleaned up stale Chrome lockfile: %s", lock_name)
+                except Exception:
+                    pass
+
             # ── Linux/AWS: ensure DISPLAY is set if headless=False ──
             if os.name != "nt" and not self._settings.headless:
                 if not os.environ.get("DISPLAY"):

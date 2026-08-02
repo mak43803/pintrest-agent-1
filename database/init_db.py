@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS products (
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     pin_url         TEXT,
+    price           TEXT    DEFAULT '',
     impressions     INTEGER NOT NULL DEFAULT 0,
     clicks          INTEGER NOT NULL DEFAULT 0,
     saves           INTEGER NOT NULL DEFAULT 0,
@@ -147,6 +148,7 @@ def create_database(db: Database) -> None:
         
         migrations = [
             ("pin_url", "ALTER TABLE products ADD COLUMN pin_url TEXT;"),
+            ("price", "ALTER TABLE products ADD COLUMN price TEXT DEFAULT '';"),
             ("impressions", "ALTER TABLE products ADD COLUMN impressions INTEGER NOT NULL DEFAULT 0;"),
             ("clicks", "ALTER TABLE products ADD COLUMN clicks INTEGER NOT NULL DEFAULT 0;"),
             ("saves", "ALTER TABLE products ADD COLUMN saves INTEGER NOT NULL DEFAULT 0;"),

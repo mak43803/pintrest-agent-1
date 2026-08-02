@@ -61,9 +61,9 @@ def seed_single_batch(products):
         if p_name.lower().strip() in existing_set or p["source_url"].lower().strip() in existing_set:
             continue
 
-        hook = BTS_VIRAL_HOOKS[idx % len(BTS_VIRAL_HOOKS)]
-        seo_title = f"{hook} | Amazon Finds 2026"
-        desc = f"Discover {p['title']}. {hook}. Back-To-School beauty essential under $20 on Amazon!"
+        clean_short_title = " ".join(p_name.split()[:7])
+        seo_title = f"{clean_short_title} | Back-To-School Beauty Find 2026"
+        desc = f"Discover {p_name}. Back-To-School beauty essential under $20 on Amazon!"
 
         cursor.execute(
             """

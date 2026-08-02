@@ -16,7 +16,7 @@
 ## Persistent Automation & Self-Healing Memory
 1. **Linktree Drawer Dismissal**: Before interacting with the purple `+ Add` button on Linktree Shop, always dismiss open left profile drawers using backdrop clicks `mouse.click(700, 300)` and top-left profile button toggles.
 2. **Instant 5-Second Recovery**: On any pipeline error or step failure, retry immediately in 5 seconds without sleeping 5 minutes.
-3. **Pending Linktree Sync Priority**: If a product has status `Pinterest_Published`, resume DIRECTLY at Step 6 (Linktree Link Addition). Never research new products until pending Linktree sync is fully completed.
+3. **Direct Amazon Storefront Publishing**: Publish pins directly to Pinterest using tagged Amazon Storefront links (`savvyshop0965-20`). Linktree sync is bypassed for faster execution and direct user conversion.
 4. **Local Ollama Qwen AI Self-Healing**: On Python code or locator exceptions, invoke local Ollama model `qwen3:8b` via `http://localhost:11434/api/generate` to auto-repair file tracebacks without requiring external API keys.
 5. **Affiliate Tag Integrity**: Ensure target tag `savvyshop0965-20` is attached to 100% of Amazon URLs.
 

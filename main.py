@@ -546,17 +546,9 @@ async def main() -> None:
 
 
     
-                    # ── Exponential backoff based on failure count ─────────────────
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        logger.error(f"⚠️ {MAX_CONSECUTIVE_FAILURES} consecutive failures! Sleeping 30 min before retry...")
-                        await asyncio.sleep(1800)  # 30 minutes
-                        consecutive_failures = 0
-                    elif consecutive_failures >= 3:
-                        logger.warning("3 failures in a row. Sleeping 15 min...")
-                        await asyncio.sleep(900)  # 15 minutes
-                    else:
-                        logger.warning("Pipeline step encountered error. Safe Schedule: Waiting 15-25 minutes before next cycle...")
-                        # Fallthrough to regular 15-25 min delay below
+                    # ── Instant 5-Second Recovery ──────────────────────────────────
+                    logger.warning("Pipeline step encountered error. Retrying in 5 seconds...")
+                    await asyncio.sleep(5)
     
                 # ── Handle success / duplicate after try block ─────────────────
                 if success == "DUPLICATE":
@@ -571,13 +563,13 @@ async def main() -> None:
                         except Exception as m_err:
                             logger.warning("Failed to mark Trend Miner ID #%s as pinned: %s", trending_miner_id, m_err)
                 else:
-                    logger.warning("Pipeline returned False or quality check skipped item. Scheduling next cycle with safe delay...")
+                    logger.warning("Pipeline returned False or quality check skipped item. Continuing next cycle...")
                     
-                # 3. Safe Zone Human Pacing: Random 15 to 25 minutes delay between pins (Non-stop for 90 Days)
-                import random
-                interval_mins = random.randint(15, 25)
-                logger.info("⏳ Safe Zone Schedule: Next pin scheduled in %d minutes (Randomized 15-25 min delay)...", interval_mins)
-                await asyncio.sleep(interval_mins * 60)
+                # 3. Scheduled Mode Pacing: 10 to 15 minutes delay between cycles
+                delay_seconds = random.randint(600, 900)
+                delay_minutes = delay_seconds / 60.0
+                logger.info(f"⏳ 10-15 Min Scheduling Active: Next pin cycle scheduled in {delay_minutes:.1f} minutes ({delay_seconds} seconds)...")
+                await asyncio.sleep(delay_seconds)
                 
             # Exit outer loop cleanly if inner loop breaks without Exception
             break

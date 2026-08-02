@@ -529,22 +529,50 @@ class PinterestAgent:
 
         if db_pending_row:
             db_product_id = db_pending_row["id"]
-            p_title = db_pending_row.get("title") or db_pending_row.get("product_name") or "Sephora Viral Beauty Find"
+            p_name = db_pending_row.get("product_name") or "Sephora Viral Beauty Find"
+            p_title = db_pending_row.get("title") or p_name
             p_img = db_pending_row.get("image_path") or "https://m.media-amazon.com/images/I/61ZQlTnCUbL._AC_UL320_.jpg"
             p_source = db_pending_row.get("source_url") or ""
             p_aff = db_pending_row.get("affiliate_link") or p_source
             p_board = db_pending_row.get("board_name") or "Sephora Viral Beauty Finds 2026"
 
-            logger.info("📦 PRE-SEEDED QUEUE DETECTED! Processing Product ID #%d: '%s' (Board: '%s')...", db_product_id, p_title, p_board)
-            product_details = AmazonProduct(
-                title=p_title,
-                description=f"Discover {p_title}. Sephora viral beauty essential!",
-                price="$16.99",
-                rating=4.8,
-                review_count=15000,
-                image_url=p_img,
-                affiliate_url=p_aff
-            )
+            logger.info("📦 PRE-SEEDED QUEUE DETECTED! Processing Product ID #%d: '%s' (Board: '%s')...", db_product_id, p_name[:40], p_board)
+            
+            # Resolve link to clean direct ASIN URL
+            clean_link = await self.amazon.ensure_direct_product_url(p_aff)
+            
+            # Synchronize Title, Image, and Price directly from the live Amazon ASIN page
+            product_details = None
+            try:
+                if "/dp/" in clean_link:
+                    fetched = await self.amazon.fetch_product_details(clean_link)
+                    if fetched and fetched.title and fetched.title != "Unknown Product":
+                        product_details = fetched
+                        product_details.affiliate_url = clean_link
+                        logger.info("✅ Live Product Synced with Amazon ASIN Page: '%s' (Price: %s)", product_details.title, product_details.price)
+            except Exception as sync_err:
+                logger.warning(f"Could not live sync Amazon product details: {sync_err}")
+
+            if not product_details:
+                # Sanitize title to match product_name if title is mismatched
+                clean_short = " ".join(p_name.split()[:7])
+                p_title = f"{clean_short} | Sephora Beauty Finds 2026"
+                product_details = AmazonProduct(
+                    title=p_title,
+                    description=f"Discover {p_name}. Sephora viral beauty essential!",
+                    price=db_pending_row.get("price") or "",
+                    rating=4.8,
+                    review_count=15000,
+                    image_url=p_img,
+                    affiliate_url=clean_link
+                )
+            else:
+                # Update DB record with live synced ASIN link, product details, and price
+                with self.db.connection() as conn:
+                    conn.execute(
+                        "UPDATE products SET product_name = ?, affiliate_link = ?, price = ? WHERE id = ?",
+                        (product_details.title, clean_link, product_details.price, db_product_id)
+                    )
         else:
             # Fetch ALL previously posted products to avoid duplicates completely
             past_products = []
@@ -739,7 +767,12 @@ class PinterestAgent:
             self.pin_counter += 1
             # Ensure overlay text on pin image strictly matches the actual product title and brand
             raw_headline = getattr(seo_data, "image_headline", None)
-            if not raw_headline or len(raw_headline.strip()) < 3 or "selected" in raw_headline.lower() or "trending product" in raw_headline.lower():
+            prod_title_lower = product_details.title.lower()
+            headline_lower = (raw_headline or "").lower()
+            mismatch_terms = [("patch", "lip oil"), ("patch", "cushion"), ("patch", "foundation"), ("patch", "setting spray"), ("lip", "foundation"), ("sunscreen", "lip oil")]
+            is_mismatched_headline = any((c1 in prod_title_lower and c2 in headline_lower) for c1, c2 in mismatch_terms)
+
+            if not raw_headline or len(raw_headline.strip()) < 3 or is_mismatched_headline or "selected" in raw_headline.lower() or "trending product" in raw_headline.lower():
                 headline = " ".join(product_details.title.split()[:6])
             else:
                 headline = raw_headline.strip()
@@ -816,13 +849,20 @@ class PinterestAgent:
                     
                 await self.pinterest.login(email, password)
                 
+            clean_link = await self.amazon.ensure_direct_product_url(product_details.affiliate_url)
+            if "/dp/" not in clean_link:
+                logger.error("❌ Link verification failed! Link '%s' is not a direct ASIN product page. Aborting upload.", clean_link)
+                raise ValueError(f"Cannot publish pin with non-direct search link: {clean_link}")
+
+            logger.info("✅ Verified clean direct Amazon product link for Pin: %s", clean_link)
+            
             # Create the Pin
             pin_url = await self.pinterest.create_pin(
                 image_path=pin_image_path,
                 title=seo_data.title,
                 description=seo_data.description,
                 board_name=target_board,
-                link=product_details.affiliate_url,
+                link=clean_link,
                 alt_text=seo_data.alt_text
             )
             if not pin_url:
@@ -844,12 +884,13 @@ class PinterestAgent:
                 conn.execute(
                     """
                     UPDATE products SET 
-                        status = 'Pinterest_Published',
+                        status = 'Published',
                         pin_url = ?,
                         image_path = ?,
                         title = ?,
                         description = ?,
                         board_name = ?,
+                        price = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
@@ -859,6 +900,7 @@ class PinterestAgent:
                         seo_data.title,
                         seo_data.description,
                         target_board,
+                        getattr(product_details, "price", ""),
                         now_iso,
                         db_product_id
                     )
@@ -866,33 +908,27 @@ class PinterestAgent:
             else:
                 conn.execute(
                     """
-                    INSERT INTO products (product_name, category, board_name, status, image_path, source_url, title, description, affiliate_link, pin_url, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO products (product_name, category, board_name, status, image_path, source_url, title, description, affiliate_link, pin_url, price, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         final_product_name,
                         niche,
                         target_board,
-                        "Pinterest_Published",
+                        "Published",
                         pin_image_path,
                         product_details.image_url,
                         seo_data.title,
                         seo_data.description,
                         product_details.affiliate_url,
                         pin_url,
+                        getattr(product_details, "price", ""),
                         now_iso,
                         now_iso
                     )
                 )
 
-        # Mark as fully Published (Pinterest only — no Linktree step)
-        with self.db.connection() as conn:
-            conn.execute(
-                "UPDATE products SET status = 'Published' WHERE affiliate_link = ?",
-                (product_details.affiliate_url,)
-            )
-
-        logger.info("🎉 SUCCESS! Pin published at: %s", pin_url)
+        logger.info("🎉 SUCCESS! Pin published directly to Pinterest with Direct Amazon Affiliate Link: %s", pin_url)
         return True
     def _get_unique_trend_fallback(self, live_trends: list[str], past_products: list[str], niche: str) -> str:
         """
@@ -1210,3 +1246,40 @@ class PinterestAgent:
                     
         # 5. Last resort fallback
         return "trending beauty product"
+
+    def get_pending_linktree_product(self) -> dict | None:
+        """Fetch next product that has status 'Pinterest_Published' but has not been synced to Linktree."""
+        with self.db.connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, product_name, category, affiliate_link, title, source_url FROM products WHERE status = 'Pinterest_Published' ORDER BY id ASC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    async def sync_pending_linktree_product(self, product_item: dict) -> bool:
+        """Add pending product link to Linktree Shop under its category collection and mark status as 'Published'."""
+        if not hasattr(self, "linktree") or not self.linktree:
+            from browser.linktree_client import LinktreeClient
+            self.linktree = LinktreeClient(self.browser_manager)
+
+        title = product_item.get("title") or product_item.get("product_name") or "Beauty Product"
+        clean_title = title if len(title) <= 60 else " ".join(title.split()[:7])
+        category = product_item.get("category") or "Amazon Beauty Finds"
+        url = product_item.get("affiliate_link") or product_item.get("source_url")
+
+        if not url:
+            logger.error(f"Cannot sync product [ID #{product_item['id']}]: empty affiliate URL")
+            return False
+
+        logger.info(f"Syncing pending product [ID #{product_item['id']}] to Linktree: '{clean_title}'...")
+        success = await self.linktree.add_link(title=clean_title, url=url, category=category)
+        if success:
+            with self.db.connection() as conn:
+                conn.execute("UPDATE products SET status = 'Published' WHERE id = ?", (product_item["id"],))
+            logger.info(f"✅ Successfully synced ID #{product_item['id']} to Linktree!")
+            return True
+        else:
+            logger.error(f"❌ Failed to sync ID #{product_item['id']} to Linktree.")
+            return False
