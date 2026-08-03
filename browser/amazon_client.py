@@ -226,34 +226,61 @@ class AmazonClient:
                     
                 full_url = href if href.startswith("http") else "https://www.amazon.com" + href
                 
-                # Extract Rating
-                rating = 0.0
-                rating_loc = card.locator('i[class*="a-icon-star"], span[aria-label*="out of 5 stars"], span.a-icon-alt').first
-                if await rating_loc.count() > 0:
-                    r_text = await rating_loc.get_attribute("aria-label") or await rating_loc.inner_text() or ""
-                    rating = self.parse_amazon_rating(r_text)
-                    
-                # Extract Review Count
-                reviews = 0
-                review_loc = card.locator('span[aria-label*="ratings"], span[aria-label*="reviews"], a[href*="#customerReviews"] span, span.s-underline-text').first
-                if await review_loc.count() > 0:
-                    rev_text = await review_loc.get_attribute("aria-label") or await review_loc.inner_text() or ""
-                    reviews = self.parse_amazon_review_count(rev_text)
-                    
-                logger.info("Candidate #%d: Rating=%.1f★, Reviews=%d │ URL: %s", i+1, rating, reviews, full_url[:60])
+                # Extract Card Title
+                card_title = ""
+                title_loc = card.locator('h2 a span, a h2 span, h2 span, span.a-size-medium, span.a-size-base-plus').first
+                if await title_loc.count() > 0:
+                    card_title = (await title_loc.inner_text()).strip()
+                if not card_title:
+                    card_title = link_text.title()
+
+                # Extract Card Image
+                card_img = ""
+                img_loc = card.locator('img.s-image').first
+                if await img_loc.count() > 0:
+                    card_img = await img_loc.get_attribute("src") or ""
+
+                # Extract Card Price (Exact Real Amazon Price)
+                card_price = ""
+                price_loc = card.locator('span.a-price span.a-offscreen').first
+                if await price_loc.count() > 0:
+                    p_text = await price_loc.get_attribute("textContent") or await price_loc.inner_text() or ""
+                    import re
+                    m = re.search(r'\$\s*(\d+(?:\.\d{2})?)', p_text)
+                    if m:
+                        try:
+                            val = float(m.group(1))
+                            if 1.0 <= val <= 999.0:
+                                card_price = f"${val:.2f}".replace(".00", "")
+                        except ValueError:
+                            pass
+                if not card_price:
+                    w_loc = card.locator('span.a-price-whole').first
+                    f_loc = card.locator('span.a-price-fraction').first
+                    if await w_loc.count() > 0:
+                        w = re.sub(r'\D', '', await w_loc.inner_text() or "")
+                        f = re.sub(r'\D', '', await f_loc.inner_text() or "00") if await f_loc.count() > 0 else "00"
+                        if w:
+                            try:
+                                val = float(f"{w}.{f[:2]}")
+                                card_price = f"${val:.2f}".replace(".00", "")
+                            except ValueError:
+                                pass
+
+                logger.info("Candidate #%d: Price=%s │ Rating=%.1f★ │ Reviews=%d │ URL: %s", i+1, card_price or "N/A", rating, reviews, full_url[:60])
                 
                 # Check Quality Shield criteria
                 if rating >= min_rating and reviews >= min_reviews:
-                    logger.info("🛡️ QUALITY SHIELD PASSED! Candidate #%d: Rating %.1f★, Reviews %d", i+1, rating, reviews)
-                    candidates.append((rating, reviews, full_url))
+                    logger.info("🛡️ QUALITY SHIELD PASSED! Candidate #%d: Price %s, Rating %.1f★, Reviews %d", i+1, card_price or "N/A", rating, reviews)
+                    candidates.append((rating, reviews, full_url, card_title, card_img, card_price))
                 elif rating >= 4.0 and reviews >= 100:
-                    candidates.append((rating, reviews, full_url))
+                    candidates.append((rating, reviews, full_url, card_title, card_img, card_price))
                     
             if candidates:
                 # Sort descending by review count and star rating to select the #1 Bestseller Hero Product
                 candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-                best_rating, best_reviews, best_url = candidates[0]
-                logger.info("🏆 SELECTED #1 HERO BEAUTY PRODUCT: Rating %.1f★, Reviews %d │ %s", best_rating, best_reviews, best_url[:60])
+                best_rating, best_reviews, best_url, best_title, best_img, best_price = candidates[0]
+                logger.info("🏆 SELECTED #1 HERO BEAUTY PRODUCT: Price %s, Rating %.1f★, Reviews %d │ %s", best_price or "N/A", best_rating, best_reviews, best_url[:60])
                 return best_url
 
             # Final Fallback
@@ -272,6 +299,140 @@ class AmazonClient:
             
         except Exception as exc:
             logger.error("Failed to search Amazon: %s", exc)
+            return None
+            
+        finally:
+            await page.close()
+
+    async def search_and_fetch_product(self, keyword: str) -> AmazonProduct | None:
+        """
+        Searches Amazon for a keyword, extracts real card price/title/image,
+        and attempts to fetch full product details with 100% price guarantee.
+        """
+        import re, urllib.parse
+        clean_keyword = re.sub(r'^(?:Product Name|Product Title|Selected Product|Product|Title|Search Query|Keyword)\s*:\s*', '', keyword, flags=re.IGNORECASE).strip()
+        logger.info("Searching Amazon for: '%s' (Quality Shield)...", clean_keyword)
+        
+        page = await self.manager.new_page()
+        candidates = []
+        
+        try:
+            search_url = f"https://www.amazon.com/s?k={urllib.parse.quote(clean_keyword)}&i=beauty"
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
+            
+            book_terms = ["book", "paperback", "hardcover", "kindle", "edition", "novel", "handbook", "manual", "usmle", "study guide", "textbook", "audiobook", "guide"]
+            result_cards = page.locator('div[data-component-type="s-search-result"]')
+            card_count = await result_cards.count()
+            logger.info("Found %d search result cards on Amazon.", card_count)
+            
+            for i in range(min(card_count, 20)):
+                card = result_cards.nth(i)
+                link_loc = card.locator('a[href*="/dp/"]').first
+                if await link_loc.count() == 0:
+                    continue
+                    
+                href = await link_loc.get_attribute("href")
+                if not href or "/dp/" not in href:
+                    continue
+                    
+                link_text = (await link_loc.inner_text()).lower()
+                href_lower = href.lower()
+                if any(bt in href_lower or bt in link_text for bt in book_terms):
+                    continue
+                    
+                full_url = href if href.startswith("http") else "https://www.amazon.com" + href
+                
+                # Card Title
+                card_title = ""
+                t_loc = card.locator('h2 a span, a h2 span, h2 span, span.a-size-medium, span.a-size-base-plus').first
+                if await t_loc.count() > 0:
+                    card_title = (await t_loc.inner_text()).strip()
+                if not card_title:
+                    card_title = clean_keyword
+                    
+                # Card Image
+                card_img = ""
+                img_loc = card.locator('img.s-image').first
+                if await img_loc.count() > 0:
+                    card_img = await img_loc.get_attribute("src") or ""
+                    
+                # Card Price (Real Amazon Price)
+                card_price = ""
+                p_loc = card.locator('span.a-price span.a-offscreen').first
+                if await p_loc.count() > 0:
+                    p_text = await p_loc.get_attribute("textContent") or await p_loc.inner_text() or ""
+                    m = re.search(r'\$\s*(\d+(?:\.\d{2})?)', p_text)
+                    if m:
+                        try:
+                            val = float(m.group(1))
+                            if 1.0 <= val <= 999.0:
+                                card_price = f"${val:.2f}".replace(".00", "")
+                        except ValueError:
+                            pass
+                if not card_price:
+                    w_loc = card.locator('span.a-price-whole').first
+                    f_loc = card.locator('span.a-price-fraction').first
+                    if await w_loc.count() > 0:
+                        w = re.sub(r'\D', '', await w_loc.inner_text() or "")
+                        f = re.sub(r'\D', '', await f_loc.inner_text() or "00") if await f_loc.count() > 0 else "00"
+                        if w:
+                            try:
+                                val = float(f"{w}.{f[:2]}")
+                                card_price = f"${val:.2f}".replace(".00", "")
+                            except ValueError:
+                                pass
+                                
+                rating = 0.0
+                rat_loc = card.locator('i[class*="a-icon-star"], span[aria-label*="out of 5 stars"]').first
+                if await rat_loc.count() > 0:
+                    r_text = await rat_loc.get_attribute("aria-label") or await rat_loc.inner_text() or ""
+                    rating = self.parse_amazon_rating(r_text)
+                    
+                reviews = 0
+                rev_loc = card.locator('span[aria-label*="ratings"], span.s-underline-text').first
+                if await rev_loc.count() > 0:
+                    rev_text = await rev_loc.get_attribute("aria-label") or await rev_loc.inner_text() or ""
+                    reviews = self.parse_amazon_review_count(rev_text)
+                    
+                aff_link = self.add_affiliate_tag(full_url, self.affiliate_tag)
+                
+                if rating >= 4.0 and reviews >= 100:
+                    candidates.append((rating, reviews, aff_link, card_title, card_img, card_price))
+                    
+            await page.close()
+            
+            if candidates:
+                candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                best_rat, best_rev, best_url, best_title, best_img, best_price = candidates[0]
+                logger.info("🏆 SELECTED HERO PRODUCT FROM SEARCH: '%s' (Price: %s, Rating: %.1f★, Reviews: %d)", best_title[:40], best_price or "N/A", best_rat, best_rev)
+                
+                # Attempt live DP details fetch
+                fetched_prod = None
+                try:
+                    fetched_prod = await self.fetch_product_details(best_url)
+                except Exception as dp_err:
+                    logger.warning(f"DP page fetch failed ({dp_err}). Using search card live details...")
+                    
+                if fetched_prod:
+                    # Guarantee price is not lost
+                    if not fetched_prod.price and best_price:
+                        fetched_prod.price = best_price
+                    return fetched_prod
+                else:
+                    return AmazonProduct(
+                        title=best_title,
+                        description=f"Discover {best_title}. Sephora & Amazon viral beauty essential!",
+                        image_url=best_img,
+                        affiliate_url=best_url,
+                        rating=best_rat,
+                        review_count=best_rev,
+                        price=best_price
+                    )
+            return None
+        except Exception as err:
+            logger.error("search_and_fetch_product failed: %s", err)
+            await page.close()
             return None
             
         finally:

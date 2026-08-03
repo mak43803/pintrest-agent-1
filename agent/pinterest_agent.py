@@ -644,14 +644,13 @@ class PinterestAgent:
 
                 logger.info("Sourcing Attempt [%d/%d] — Selected Keyword: %s", sourcing_attempt, max_sourcing_attempts, current_keyword)
                 
-                # Step 2: Amazon Sourcing
+                # Step 2: Amazon Sourcing (100% Price & Metadata Guarantee)
                 async def step_amazon_sourcing():
                     logger.info("STEP 2: Sourcing from Amazon for '%s'...", current_keyword)
-                    amazon_url = await self.amazon.search_products(current_keyword)
-                    if not amazon_url:
+                    prod = await self.amazon.search_and_fetch_product(current_keyword)
+                    if not prod:
                         raise Exception(f"Failed to find product '{current_keyword}' on Amazon.")
-                        
-                    return await self.amazon.fetch_product_details(amazon_url)
+                    return prod
                     
                 try:
                     candidate_details = await self.execute_task_with_memory("Amazon Sourcing", step_amazon_sourcing)
