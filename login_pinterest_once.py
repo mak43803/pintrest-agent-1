@@ -8,11 +8,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s │ %(levelname)-8s 
 logger = logging.getLogger("login_pinterest")
 
 async def main():
-    import subprocess
+    import os
     user_data_dir = str(PROJECT_ROOT / "browser_session")
-    logger.info("Killing any background Chrome processes locking browser_session...")
+    logger.info("Cleaning up background Chrome processes...")
     try:
-        subprocess.run(["powershell", "-Command", "Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"], capture_output=True)
+        os.system('taskkill /F /IM chrome.exe >nul 2>&1')
+        os.system('taskkill /F /IM chromedriver.exe >nul 2>&1')
     except Exception:
         pass
         
@@ -34,11 +35,11 @@ async def main():
         
         page = context.pages[0] if context.pages else await context.new_page()
         
-        logger.info("Opening Pinterest Login...")
+        logger.info("Opening Pinterest Login Page (https://www.pinterest.com/login/)...")
         try:
-            await page.goto("https://www.pinterest.com/login/", wait_until="commit", timeout=30000)
-        except Exception:
-            pass
+            await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=60000)
+        except Exception as nav_err:
+            logger.warning(f"Initial navigation notice: {nav_err}")
         
         logger.info("=========================================================")
         logger.info("📌 PINTEREST MANUAL LOGIN WINDOW IS NOW OPEN!")
