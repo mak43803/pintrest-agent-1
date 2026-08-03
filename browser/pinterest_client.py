@@ -155,9 +155,9 @@ class PinterestClient:
             # Wait for either the login button (not logged in) or the profile avatar (logged in)
             # Pinterest DOM changes often, so we check for common data-test-ids
             try:
-                # Wait up to 5 seconds for a definitive logged-in element
+                # Wait up to 5 seconds for any logged-in header element (Personal or Business Account)
                 await page.wait_for_selector(
-                    '[data-test-id="header-profile"]', 
+                    '[data-test-id="header-profile"], [data-test-id="header-accounts-options-button"], [data-test-id="pro-partner-header"], [data-test-id="gestalt-avatar-svg"], [data-test-id="mega-nav-header-name"]', 
                     state="visible", 
                     timeout=5000
                 )
