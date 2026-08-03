@@ -38,7 +38,7 @@ class OllamaSettings:
 @dataclass(frozen=True)
 class BrowserSettings:
     """Configuration for the Playwright browser."""
-    headless: bool = os.getenv("BROWSER_HEADLESS", "true").lower() == "true"
+    headless: bool = os.getenv("BROWSER_HEADLESS", "false" if os.name == "nt" else "true").lower() == "true"
     slow_mo: int = int(os.getenv("BROWSER_SLOW_MO", "250"))
     viewport_width: int = int(os.getenv("BROWSER_VIEWPORT_WIDTH", "1280"))
     viewport_height: int = int(os.getenv("BROWSER_VIEWPORT_HEIGHT", "800"))

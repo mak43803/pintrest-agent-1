@@ -479,49 +479,67 @@ class PinterestClient:
 
             # Redirection guard: ensure we are on the builder canvas
             if "pin-builder" not in page.url and "creation" not in page.url:
-                logger.info("Detected redirect to main feed. Force navigating directly to /pin-builder/...")
-                await page.goto(f"{self.BASE_URL}/pin-builder/", wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(3000)
+                logger.info("Detected redirect to main feed. Attempting header 'Create' button click...")
+                try:
+                    create_hdr = page.locator('a[href*="pin-builder"], a[href*="creation"], [data-test-id="mega-nav-header-name"]:has-text("Create"), button:has-text("Create")').first
+                    if await create_hdr.count() > 0 and await create_hdr.is_visible():
+                        await create_hdr.click(force=True)
+                        await page.wait_for_timeout(3000)
+                except Exception as hdr_err:
+                    logger.debug(f"Header create button click skipped: {hdr_err}")
+                    
+                if "pin-builder" not in page.url and "creation" not in page.url:
+                    logger.info("Force navigating directly to /pin-builder/...")
+                    await page.goto(f"{self.BASE_URL}/pin-builder/", wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(3000)
 
             # Dismiss any tour modals (e.g. escape key)
             for _ in range(3):
                 await page.keyboard.press('Escape')
                 await page.wait_for_timeout(300)
 
-            # 1. Upload Image
+            # 1. Upload Image (Resilient 4-attempt loop)
             logger.debug("Uploading image...")
             uploaded = False
             
-            # Strategy A: Direct set_input_files on attached file inputs (100% Reliable for Pinterest 2026)
-            try:
-                await page.wait_for_selector('input[type="file"], [data-test-id="media-upload-input"]', state="attached", timeout=15000)
-                file_inputs = await page.locator('input[type="file"], [data-test-id="media-upload-input"]').all()
-                for file_input in file_inputs:
-                    try:
-                        await file_input.set_input_files(image_path)
-                        await page.wait_for_timeout(3000)
-                        uploaded = True
-                        logger.info("Uploaded image via attached file input.")
-                        break
-                    except Exception as input_err:
-                        logger.debug(f"File input set error: {input_err}")
-            except Exception as direct_err:
-                logger.debug(f"Direct set_input_files strategy skipped: {direct_err}")
+            for upload_attempt in range(1, 5):
+                logger.info("Pin image upload attempt %d/4 for '%s'...", upload_attempt, os.path.basename(image_path))
+                
+                # Method 1: Direct set_input_files on attached file inputs
+                try:
+                    file_inputs = await page.locator('input[type="file"], [data-test-id="media-upload-input"]').all()
+                    if len(file_inputs) > 0:
+                        for file_input in file_inputs:
+                            try:
+                                await file_input.set_input_files(image_path)
+                                await page.wait_for_timeout(3000)
+                                uploaded = True
+                                logger.info("Uploaded image via attached file input on attempt %d.", upload_attempt)
+                                break
+                            except Exception as set_err:
+                                logger.debug(f"Input file set error on attempt {upload_attempt}: {set_err}")
+                except Exception as direct_err:
+                    logger.debug(f"Direct file input locator error on attempt {upload_attempt}: {direct_err}")
 
-            # Strategy B: Dropzone click file chooser fallback
-            if not uploaded:
+                if uploaded:
+                    break
+
+                # Method 2: Native dropzone click via expect_file_chooser
                 try:
                     dropzone = page.locator('[data-test-id="media-empty-view"], [aria-label*="Choose a file" i], div:has-text("Choose a file"), [data-test-id="pin-draft-media-slot"]').first
                     if await dropzone.count() > 0:
-                        async with page.expect_file_chooser(timeout=7000) as fc_info:
+                        async with page.expect_file_chooser(timeout=5000) as fc_info:
                             await dropzone.click(force=True)
                         file_chooser = await fc_info.value
                         await file_chooser.set_files(image_path)
                         await page.wait_for_timeout(3000)
                         uploaded = True
-                        logger.info("Uploaded image via native dropzone file chooser.")
+                        logger.info("Uploaded image via native dropzone file chooser on attempt %d.", upload_attempt)
+                        break
                 except Exception as fc_err:
-                    logger.debug(f"Dropzone file chooser strategy skipped: {fc_err}")
+                    logger.debug(f"Dropzone file chooser error on attempt {upload_attempt}: {fc_err}")
+
+                await page.wait_for_timeout(2000)
 
             if not uploaded:
                 raise Exception(f"Pin image upload failed for file '{image_path}'. Cannot publish pin without image.")
