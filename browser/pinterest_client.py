@@ -497,7 +497,7 @@ class PinterestClient:
             
             # Strategy A: File chooser via dropzone click (100% Reliable for Pinterest 2026)
             try:
-                dropzone = page.locator('[data-test-id="media-empty-view"], [data-test-id="pin-draft-media-slot"], [data-test-id^="media-upload-input"]').first
+                dropzone = page.locator('[data-test-id="media-empty-view"], [aria-label*="Choose a file" i], div:has-text("Choose a file"), [data-test-id="pin-draft-media-slot"]').first
                 if await dropzone.count() > 0 and await dropzone.is_visible():
                     async with page.expect_file_chooser(timeout=7000) as fc_info:
                         await dropzone.click(force=True)
@@ -509,29 +509,17 @@ class PinterestClient:
             except Exception as fc_err:
                 logger.debug(f"Dropzone file chooser strategy skipped: {fc_err}")
 
-            # Strategy B: Direct set_input_files on file inputs
+            # Strategy B: Direct set_input_files on page file locator
             if not uploaded:
-                for selector in [
-                    'input[data-test-id="media-upload-input"]',
-                    '[data-test-id^="media-upload-input"]',
-                    'input[type="file"][accept*="image"]',
-                    'input[type="file"]',
-                    'input[accept="image/*"]'
-                ]:
-                    locs = await page.locator(selector).all()
-                    for input_el in locs:
-                        try:
-                            await input_el.set_input_files(image_path)
-                            await page.wait_for_timeout(3000)
-                            uploaded = True
-                            logger.info("Uploaded image via direct set_input_files.")
-                            break
-                        except Exception as img_err:
-                            if "closed" in str(img_err).lower() or "target" in str(img_err).lower():
-                                raise img_err
-                            logger.debug(f"Direct file input attempt error on '{selector}': {img_err}")
-                    if uploaded:
-                        break
+                try:
+                    file_loc = page.locator('input[type="file"]').first
+                    if await file_loc.count() > 0:
+                        await file_loc.set_input_files(image_path)
+                        await page.wait_for_timeout(3000)
+                        uploaded = True
+                        logger.info("Uploaded image via direct page set_input_files.")
+                except Exception as img_err:
+                    logger.debug(f"Direct set_input_files strategy skipped: {img_err}")
 
             if not uploaded:
                 raise Exception(f"Pin image upload failed for file '{image_path}'. Cannot publish pin without image.")
