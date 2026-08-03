@@ -134,7 +134,6 @@ from browser.browser_manager import BrowserManager
 from browser.pinterest_client import PinterestClient
 from browser.amazon_client import AmazonClient, AmazonProduct
 from browser.gemini_web_client import GeminiWebClient
-from browser.linktree_client import LinktreeClient
 from tools.image_tools import ImageTools
 from logs.logger import setup_logger
 from logs.log_manager import LogManager
@@ -167,7 +166,6 @@ class PinterestAgent:
         self.amazon = AmazonClient(self.browser_manager, os.getenv("AMAZON_AFFILIATE_TAG", "yourtag-20"))
         
         self.gemini = GeminiWebClient(self.browser_manager)
-        self.linktree = LinktreeClient(self.browser_manager)
         
         self.pinterest = PinterestClient(self.browser_manager)
         self.pinterest.enable_vision_healing(self.db, self.gemini.analyze_ui_for_selector)
