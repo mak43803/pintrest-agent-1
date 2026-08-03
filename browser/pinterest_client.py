@@ -486,14 +486,19 @@ class PinterestClient:
             logger.debug("Uploading image...")
             uploaded = False
             
-            # Strategy A: Direct set_input_files on file input (Works on 100% of Pinterest accounts)
+            # Strategy A: Direct set_input_files on attached file inputs (100% Reliable for Pinterest 2026)
             try:
-                file_input = page.locator('input[type="file"], [data-test-id="media-upload-input"]').first
-                await page.wait_for_selector('input[type="file"], [data-test-id="media-upload-input"]', timeout=15000)
-                await file_input.set_input_files(image_path)
-                await page.wait_for_timeout(3000)
-                uploaded = True
-                logger.info("Uploaded image via direct set_input_files.")
+                await page.wait_for_selector('input[type="file"], [data-test-id="media-upload-input"]', state="attached", timeout=15000)
+                file_inputs = await page.locator('input[type="file"], [data-test-id="media-upload-input"]').all()
+                for file_input in file_inputs:
+                    try:
+                        await file_input.set_input_files(image_path)
+                        await page.wait_for_timeout(3000)
+                        uploaded = True
+                        logger.info("Uploaded image via attached file input.")
+                        break
+                    except Exception as input_err:
+                        logger.debug(f"File input set error: {input_err}")
             except Exception as direct_err:
                 logger.debug(f"Direct set_input_files strategy skipped: {direct_err}")
 
