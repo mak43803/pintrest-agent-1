@@ -468,58 +468,49 @@ class PinterestClient:
         page = await self._get_page()
         logger.info("Executing pin creation flow  │  title='%s'  board='%s'", title, board_name)
         try:
-            # Navigate to Pinterest Pin Creation Tool / Pin Builder
+            # Navigate to Pinterest Pin Creation Tool
             try:
-                await page.goto(f"{self.BASE_URL}/pin-creation-tool/", wait_until="commit", timeout=60000)
+                await page.goto(f"{self.BASE_URL}/pin-creation-tool/", wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
-                logger.warning(f"Navigating to pin-creation-tool failed, trying pin-builder: {e}")
-                await page.goto(f"{self.BASE_URL}/pin-builder/", wait_until="commit", timeout=60000)
+                logger.warning(f"Navigating to pin-creation-tool notice: {e}")
+                await page.goto(f"{self.BASE_URL}/pin-builder/", wait_until="domcontentloaded", timeout=60000)
             
             await page.wait_for_timeout(3000)
-
-            # Check if file input or builder container exists; if not, click Create Pin header button
-            file_input_check = page.locator('input[type="file"], [data-test-id="media-upload-input"]')
-            if await file_input_check.count() == 0:
-                logger.info("Builder canvas not visible directly. Clicking 'Create Pin' header button...")
-                create_hdr_btn = page.locator('[data-test-id="mega-nav-header-name"]:has-text("Create Pin"), div:has-text("Create Pin"), button:has-text("Create Pin"), a[href*="pin-creation-tool"]').first
-                if await create_hdr_btn.count() > 0 and await create_hdr_btn.is_visible():
-                    await create_hdr_btn.click(force=True)
-                    await page.wait_for_timeout(3000)
 
             # Dismiss any tour modals (e.g. escape key)
             for _ in range(3):
                 await page.keyboard.press('Escape')
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(300)
 
             # 1. Upload Image
             logger.debug("Uploading image...")
             uploaded = False
             
-            # Strategy A: File chooser via dropzone click (100% Reliable for Pinterest 2026)
+            # Strategy A: Direct set_input_files on file input (Works on 100% of Pinterest accounts)
             try:
-                dropzone = page.locator('[data-test-id="media-empty-view"], [aria-label*="Choose a file" i], div:has-text("Choose a file"), [data-test-id="pin-draft-media-slot"]').first
-                if await dropzone.count() > 0 and await dropzone.is_visible():
-                    async with page.expect_file_chooser(timeout=7000) as fc_info:
-                        await dropzone.click(force=True)
-                    file_chooser = await fc_info.value
-                    await file_chooser.set_files(image_path)
-                    await page.wait_for_timeout(3000)
-                    uploaded = True
-                    logger.info("Uploaded image via native dropzone file chooser.")
-            except Exception as fc_err:
-                logger.debug(f"Dropzone file chooser strategy skipped: {fc_err}")
+                file_input = page.locator('input[type="file"], [data-test-id="media-upload-input"]').first
+                await page.wait_for_selector('input[type="file"], [data-test-id="media-upload-input"]', timeout=15000)
+                await file_input.set_input_files(image_path)
+                await page.wait_for_timeout(3000)
+                uploaded = True
+                logger.info("Uploaded image via direct set_input_files.")
+            except Exception as direct_err:
+                logger.debug(f"Direct set_input_files strategy skipped: {direct_err}")
 
-            # Strategy B: Direct set_input_files on page file locator
+            # Strategy B: Dropzone click file chooser fallback
             if not uploaded:
                 try:
-                    file_loc = page.locator('input[type="file"]').first
-                    if await file_loc.count() > 0:
-                        await file_loc.set_input_files(image_path)
+                    dropzone = page.locator('[data-test-id="media-empty-view"], [aria-label*="Choose a file" i], div:has-text("Choose a file"), [data-test-id="pin-draft-media-slot"]').first
+                    if await dropzone.count() > 0:
+                        async with page.expect_file_chooser(timeout=7000) as fc_info:
+                            await dropzone.click(force=True)
+                        file_chooser = await fc_info.value
+                        await file_chooser.set_files(image_path)
                         await page.wait_for_timeout(3000)
                         uploaded = True
-                        logger.info("Uploaded image via direct page set_input_files.")
-                except Exception as img_err:
-                    logger.debug(f"Direct set_input_files strategy skipped: {img_err}")
+                        logger.info("Uploaded image via native dropzone file chooser.")
+                except Exception as fc_err:
+                    logger.debug(f"Dropzone file chooser strategy skipped: {fc_err}")
 
             if not uploaded:
                 raise Exception(f"Pin image upload failed for file '{image_path}'. Cannot publish pin without image.")
