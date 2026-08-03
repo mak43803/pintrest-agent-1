@@ -592,11 +592,11 @@ class PinterestClient:
                         """)
                         el = js_handle.as_element()
                         if el:
-                            title_input = page.locator(':root').locator('css=input, textarea, [contenteditable]').filter(has=page.locator(':scope')).first
-                            # Use direct element handle instead
-                            await js_handle.as_element().click()
+                            await el.click()
+                            await el.focus()
                             await page.keyboard.press("Control+A")
                             await page.keyboard.press("Backspace")
+                            await page.wait_for_timeout(200)
                             await page.keyboard.insert_text(title[:100])
                             logger.info("Successfully filled Pinterest title via JS placeholder search.")
                             title_input = None  # Mark as already handled
@@ -805,11 +805,35 @@ class PinterestClient:
             # 5. Select Board
             logger.debug("Selecting board '%s'...", board_name)
             try:
-                board_dropdown = page.locator('[data-test-id="board-dropdown-select-button"]')
-                await board_dropdown.click(force=True)
-                # Wait up to 5s for the dropdown container or search box to appear
+                board_dropdown = await self._find_visible_locator(page, [
+                    '[data-test-id="board-dropdown-select-button"]',
+                    '[data-test-id="board-dropdown"]',
+                    'button[aria-label*="board" i]',
+                    'button:has-text("Choose a board")',
+                    'button:has-text("Select board")',
+                    'button:has-text("Save to")',
+                    '[data-test-id*="board" i] button',
+                    '[data-test-id*="board" i]',
+                    'button[aria-haspopup="listbox"]'
+                ])
+                if board_dropdown:
+                    await board_dropdown.click(force=True)
+                else:
+                    js_btn = await page.evaluate_handle("""
+                        () => {
+                            const btns = [...document.querySelectorAll('button, div[role="button"]')];
+                            return btns.find(b => {
+                                const txt = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
+                                return txt.includes('board') || txt.includes('choose') || txt.includes('save to');
+                            }) || null;
+                        }
+                    """)
+                    el = js_btn.as_element()
+                    if el:
+                        await el.click()
+                # Wait up to 3s for the dropdown container or search box to appear
                 try:
-                    await page.wait_for_selector('[role="listbox"], input[placeholder*="Search" i], [data-test-id="board-dropdown"]', timeout=5000)
+                    await page.wait_for_selector('[role="listbox"], input[placeholder*="Search" i], [data-test-id="board-dropdown"]', timeout=3000)
                 except Exception:
                     pass
                 await page.wait_for_timeout(1000)
