@@ -468,14 +468,20 @@ class PinterestClient:
         page = await self._get_page()
         logger.info("Executing pin creation flow  │  title='%s'  board='%s'", title, board_name)
         try:
-            # Navigate to Pinterest Pin Creation Tool
+            # Navigate to Pinterest Pin Builder (Primary 2026 URL)
             try:
-                await page.goto(f"{self.BASE_URL}/pin-creation-tool/", wait_until="domcontentloaded", timeout=60000)
-            except Exception as e:
-                logger.warning(f"Navigating to pin-creation-tool notice: {e}")
                 await page.goto(f"{self.BASE_URL}/pin-builder/", wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                logger.warning(f"Navigating to pin-builder notice: {e}")
+                await page.goto(f"{self.BASE_URL}/pin-creation-tool/", wait_until="domcontentloaded", timeout=60000)
             
             await page.wait_for_timeout(3000)
+
+            # Redirection guard: ensure we are on the builder canvas
+            if "pin-builder" not in page.url and "creation" not in page.url:
+                logger.info("Detected redirect to main feed. Force navigating directly to /pin-builder/...")
+                await page.goto(f"{self.BASE_URL}/pin-builder/", wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(3000)
 
             # Dismiss any tour modals (e.g. escape key)
             for _ in range(3):
