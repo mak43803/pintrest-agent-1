@@ -468,18 +468,23 @@ class PinterestClient:
         page = await self._get_page()
         logger.info("Executing pin creation flow  │  title='%s'  board='%s'", title, board_name)
         try:
-            # Navigate to the Pin Builder (with commit-based wait and soft fallback to survive slow loads)
+            # Navigate to Pinterest Pin Creation Tool / Pin Builder
             try:
+                await page.goto(f"{self.BASE_URL}/pin-creation-tool/", wait_until="commit", timeout=60000)
+            except Exception as e:
+                logger.warning(f"Navigating to pin-creation-tool failed, trying pin-builder: {e}")
                 await page.goto(f"{self.BASE_URL}/pin-builder/", wait_until="commit", timeout=60000)
-            except Exception as e:
-                logger.warning(f"Navigating to pin-builder failed or timed out: {e}")
             
-            # Explicitly wait up to 30 seconds for a core component of the pin builder to exist
-            try:
-                await page.wait_for_selector('input[type="file"], [data-test-id="pin-builder"]', timeout=30000)
-            except Exception as e:
-                logger.warning(f"Pin builder elements not detected: {e}")
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(3000)
+
+            # Check if file input or builder container exists; if not, click Create Pin header button
+            file_input_check = page.locator('input[type="file"], [data-test-id="media-upload-input"]')
+            if await file_input_check.count() == 0:
+                logger.info("Builder canvas not visible directly. Clicking 'Create Pin' header button...")
+                create_hdr_btn = page.locator('[data-test-id="mega-nav-header-name"]:has-text("Create Pin"), div:has-text("Create Pin"), button:has-text("Create Pin"), a[href*="pin-creation-tool"]').first
+                if await create_hdr_btn.count() > 0 and await create_hdr_btn.is_visible():
+                    await create_hdr_btn.click(force=True)
+                    await page.wait_for_timeout(3000)
 
             # Dismiss any tour modals (e.g. escape key)
             for _ in range(3):
@@ -490,91 +495,67 @@ class PinterestClient:
             logger.debug("Uploading image...")
             uploaded = False
             
-            # Strategy A: Native file chooser via dropzone click
-            try:
-                dropzone = page.locator('[data-test-id="pin-draft-media-slot"], [data-test-id="media-empty-view"], [data-test-id^="media-upload-input"]').first
-                if await dropzone.count() > 0 and await dropzone.is_visible():
-                    async with page.expect_file_chooser(timeout=5000) as fc_info:
-                        await dropzone.click(force=True)
-                    file_chooser = await fc_info.value
-                    await file_chooser.set_files(image_path)
-                    await page.wait_for_timeout(2000)
-                    logger.info("Uploaded image via native file chooser dropzone click.")
-            except Exception as fc_err:
-                logger.debug(f"File chooser dropzone click strategy skipped: {fc_err}")
-
-            # Polling check if image preview appeared
-            for _ in range(5):
-                preview_count = await page.locator('button:has-text("Edit"), button:has-text("Delete"), [data-test-id*="media"] img, [aria-label*="media" i] img, img[src^="blob:"], img[src*="pinimg"]').count()
-                if preview_count > 0:
-                    uploaded = True
-                    logger.info("Image upload confirmed (preview element detected).")
-                    break
-                await page.wait_for_timeout(1000)
-
-            # Strategy B: Fallback direct set_input_files on file inputs
-            if not uploaded:
-                for attempt in range(1, 4):
-                    for selector in [
-                        '[data-test-id^="media-upload-input"]',
-                        'input[type="file"][accept*="image"]',
-                        'input[type="file"]',
-                        'input[accept="image/*"]'
-                    ]:
-                        locs = await page.locator(selector).all()
-                        for input_el in locs:
-                            try:
-                                await input_el.set_input_files(image_path)
-                                await page.wait_for_timeout(2000)
-                                
-                                for _ in range(5):
-                                    preview_count = await page.locator('button:has-text("Edit"), button:has-text("Delete"), [data-test-id*="media"] img, [aria-label*="media" i] img, img[src^="blob:"], img[src*="pinimg"]').count()
-                                    if preview_count > 0:
-                                        uploaded = True
-                                        logger.info("Image upload confirmed (preview element detected).")
-                                        break
-                                    await page.wait_for_timeout(1000)
-                                    
-                                if uploaded:
-                                    break
-                            except Exception as img_err:
-                                if "closed" in str(img_err).lower() or "target" in str(img_err).lower():
-                                    raise img_err
-                                logger.debug(f"Image upload attempt {attempt} error: {img_err}")
-                        if uploaded:
-                            break
-                    if uploaded:
+            # Strategy A: Direct file input setting
+            for selector in [
+                'input[data-test-id="media-upload-input"]',
+                '[data-test-id^="media-upload-input"]',
+                'input[type="file"][accept*="image"]',
+                'input[type="file"]',
+                'input[accept="image/*"]'
+            ]:
+                locs = await page.locator(selector).all()
+                for input_el in locs:
+                    try:
+                        await input_el.set_input_files(image_path)
+                        await page.wait_for_timeout(3000)
+                        uploaded = True
+                        logger.info("Uploaded image via direct set_input_files.")
                         break
-                    await page.wait_for_timeout(2000)
+                    except Exception as img_err:
+                        if "closed" in str(img_err).lower() or "target" in str(img_err).lower():
+                            raise img_err
+                        logger.debug(f"File set attempt error on '{selector}': {img_err}")
+                if uploaded:
+                    break
+
+            # Strategy B: Fallback dropzone file chooser
+            if not uploaded:
+                try:
+                    dropzone = page.locator('[data-test-id="media-empty-view"], [data-test-id="pin-draft-media-slot"]').first
+                    if await dropzone.count() > 0 and await dropzone.is_visible():
+                        async with page.expect_file_chooser(timeout=5000) as fc_info:
+                            await dropzone.click(force=True)
+                        file_chooser = await fc_info.value
+                        await file_chooser.set_files(image_path)
+                        await page.wait_for_timeout(3000)
+                        uploaded = True
+                        logger.info("Uploaded image via dropzone file chooser.")
+                except Exception as fc_err:
+                    logger.debug(f"Dropzone strategy error: {fc_err}")
 
             if not uploaded:
-                raise Exception(f"Pin image upload failed: Image preview element was not detected on Pinterest pin builder for file '{image_path}'. Cannot publish pin without image.")
+                raise Exception(f"Pin image upload failed for file '{image_path}'. Cannot publish pin without image.")
 
             # 2. Fill Title
             logger.debug("Filling title...")
             title_input = None
             try:
-                # Auto-dismiss any leave site dialogs that block navigation
                 import asyncio
                 page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
                 
                 title_input = await self._find_visible_locator(page, [
+                    'textarea[placeholder="Add a title"]',
+                    'input[placeholder="Add a title"]',
+                    '[data-test-id="pin-draft-title"] textarea',
+                    '[data-test-id="pin-draft-title"] input',
                     'textarea[placeholder="Add your title"]',
                     'input[placeholder="Add your title"]',
                     '[placeholder="Add your title"]',
-                    'textarea[placeholder="Add a title"]',
-                    'input[placeholder="Add a title"]',
                     '[placeholder="Add a title"]',
                     'textarea[id^="pin-draft-title-"]',
                     'input[id^="pin-draft-title-"]',
-                    'input[id="pin-draft-title"]',
                     '#pin-draft-title',
-                    'div[role="textbox"][aria-label*="title" i]',
                     '[aria-label*="title" i]',
-                    '[data-test-id="pin-draft-title"] textarea',
-                    '[data-test-id="pin-draft-title"] input',
-                    '[data-test-id="pin-draft-title"]',
-                    '[data-test-id^="pin-draft-title"]',
                 ])
 
                 # JS fallback: find any input/textarea whose placeholder contains "title" (case-insensitive)

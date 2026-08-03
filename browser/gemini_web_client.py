@@ -30,6 +30,8 @@ class PinterestSEOData:
     board: str
     image_headline: str = ""
     curiosity_hook: str = ""
+    badge_text: str = ""
+    cta_text: str = ""
 
 
 class GeminiWebClient:
