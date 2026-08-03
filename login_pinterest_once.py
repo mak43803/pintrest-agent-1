@@ -8,24 +8,37 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s │ %(levelname)-8s 
 logger = logging.getLogger("login_pinterest")
 
 async def main():
+    import subprocess
     user_data_dir = str(PROJECT_ROOT / "browser_session")
+    logger.info("Killing any background Chrome processes locking browser_session...")
+    try:
+        subprocess.run(["powershell", "-Command", "Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"], capture_output=True)
+    except Exception:
+        pass
+        
     logger.info("Launching Chrome GUI mode to log in to Pinterest...")
     
     async with async_playwright() as p:
-        # Launch persistent context in headful mode (headless=False)
+        # Launch persistent context in GUI mode (headless=False)
         context = await p.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
-            channel="chrome",
             headless=False,
             viewport={"width": 1280, "height": 800},
             ignore_default_args=["--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled"]
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check"
+            ]
         )
         
-        page = await context.new_page()
+        page = context.pages[0] if context.pages else await context.new_page()
         
         logger.info("Opening Pinterest Login...")
-        await page.goto("https://www.pinterest.com/login", wait_until="domcontentloaded")
+        try:
+            await page.goto("https://www.pinterest.com/login/", wait_until="commit", timeout=30000)
+        except Exception:
+            pass
         
         logger.info("=========================================================")
         logger.info("📌 PINTEREST MANUAL LOGIN WINDOW IS NOW OPEN!")
