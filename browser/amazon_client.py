@@ -267,6 +267,20 @@ class AmazonClient:
                             except ValueError:
                                 pass
 
+                # Extract Rating
+                rating = 0.0
+                rating_loc = card.locator('i[class*="a-icon-star"], span[aria-label*="out of 5 stars"], span.a-icon-alt').first
+                if await rating_loc.count() > 0:
+                    r_text = await rating_loc.get_attribute("aria-label") or await rating_loc.inner_text() or ""
+                    rating = self.parse_amazon_rating(r_text)
+                    
+                # Extract Review Count
+                reviews = 0
+                review_loc = card.locator('span[aria-label*="ratings"], span[aria-label*="reviews"], a[href*="#customerReviews"] span, span.s-underline-text').first
+                if await review_loc.count() > 0:
+                    rev_text = await review_loc.get_attribute("aria-label") or await review_loc.inner_text() or ""
+                    reviews = self.parse_amazon_review_count(rev_text)
+
                 logger.info("Candidate #%d: Price=%s │ Rating=%.1f★ │ Reviews=%d │ URL: %s", i+1, card_price or "N/A", rating, reviews, full_url[:60])
                 
                 # Check Quality Shield criteria
