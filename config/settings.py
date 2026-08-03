@@ -67,14 +67,6 @@ class AgentSettings:
 
 
 @dataclass(frozen=True)
-class LinktreeSettings:
-    """Configuration for Linktree automation."""
-    username: str = os.getenv("LINKTREE_USERNAME", "baddiesbeauty43")
-    password: str = os.getenv("LINKTREE_PASSWORD", "Minelazy1231@")
-    profile_url: str = os.getenv("LINKTREE_URL", "https://linktr.ee/baddiesbeauty43")
-
-
-@dataclass(frozen=True)
 class AmazonSettings:
     """Configuration for Amazon automation."""
     affiliate_tag: str = os.getenv("AMAZON_AFFILIATE_TAG", "savvyshop0965-20")
@@ -91,7 +83,6 @@ class AppSettings:
     ollama: OllamaSettings = field(default_factory=OllamaSettings)
     browser: BrowserSettings = field(default_factory=BrowserSettings)
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
-    linktree: LinktreeSettings = field(default_factory=LinktreeSettings)
     amazon: AmazonSettings = field(default_factory=AmazonSettings)
 
 

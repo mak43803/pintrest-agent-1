@@ -128,9 +128,8 @@ def run_watchdog_audit(auto_repair: bool = False, verbose: bool = False) -> dict
         f" 🔧 Auto-Repaired Links  : {repaired_links}",
         f" ⚠️  Missing Links        : {missing_links}",
         "─────────────────────────────────────────────────────────────────",
-        f" 🌐 Fully Published (Pinterest + Linktree) : {fully_published}",
-        f" ⏳ Pending Linktree Sync                 : {pending_linktree}",
-        f" 📌 Pins with Saved Pin URL (ID #384-637) : {pins_with_url}",
+        f" 🌐 Fully Published (Pinterest Direct)   : {fully_published}",
+        f" 📌 Pins with Saved Pin URL (ID #384+)    : {pins_with_url}",
         f" 📜 Legacy Pins (Older entries #1-383)   : {legacy_pins_without_url}",
         "═════════════════════════════════════════════════════════════════",
     ]
