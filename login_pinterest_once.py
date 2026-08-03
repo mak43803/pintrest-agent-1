@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s │ %(levelname)-8s 
 logger = logging.getLogger("login_pinterest")
 
 async def main():
-    import os
+    import os, shutil
     user_data_dir = str(PROJECT_ROOT / "browser_session")
     logger.info("Cleaning up background Chrome processes...")
     try:
@@ -16,6 +16,15 @@ async def main():
         os.system('taskkill /F /IM chromedriver.exe >nul 2>&1')
     except Exception:
         pass
+
+    # Clear corrupt service worker and code cache to force clean Pinterest React rendering
+    for cache_dir in ["Service Worker", "Cache", "Code Cache", "GPUCache"]:
+        target_path = PROJECT_ROOT / "browser_session" / "Default" / cache_dir
+        if target_path.exists():
+            try:
+                shutil.rmtree(target_path, ignore_errors=True)
+            except Exception:
+                pass
         
     logger.info("Launching Chrome GUI mode to log in to Pinterest...")
     
@@ -38,6 +47,12 @@ async def main():
         logger.info("Opening Pinterest Login Page (https://www.pinterest.com/login/)...")
         try:
             await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
+            # Check if page is blank / stuck on Skip to content, and reload if needed
+            body_text = await page.inner_text("body")
+            if "Skip to content" in body_text and len(body_text) < 100:
+                logger.info("Stuck on initial cache state. Reloading page...")
+                await page.reload(wait_until="domcontentloaded", timeout=60000)
         except Exception as nav_err:
             logger.warning(f"Initial navigation notice: {nav_err}")
         
